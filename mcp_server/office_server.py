@@ -10,15 +10,22 @@ streamable-http 서버들과 달리 별도 터미널에서 실행해 둘 필요�
 Windows + Office 설치가 전제입니다. 둘 중 하나라도 없으면 서버는 그대로 실행되고,
 각 도구가 실패 사유를 담은 안내 메시지를 반환합니다.
 
-Word/PowerPoint 도구는 모두 읽기 전용입니다. Excel에만 쓰기 도구가 있으며
-outlook_server와 같은 3티어 안전 등급을 따릅니다:
-    🟢 읽기 — 모든 read_*/describe_*/find_*/inspect_* 도구 (문서를 변경하지 않음)
-    🟡 메모리 수정(저장 안 함) — write_excel_cell/write_excel_range. **사용자 세션에
-       열려 있는** 통합문서만 수정하고 디스크에는 쓰지 않는다(저장 전까지 파일 원본은
-       그대로). 주의: COM 수정은 Excel의 실행 취소(Ctrl+Z) 스택에 쌓이지 않으므로,
-       복구용으로 이전 값을 응답에 담아 돌려준다.
-    🔴 디스크 기록 — save_workbook(덮어쓰기 저장). confirm=True 없이는 실행되지
-       않고 무엇을 할지 프리뷰만 돌려준다(_preview — outlook/catia와 같은 게이트).
+Excel / Word / PowerPoint 모두 읽기와 편집을 지원하며, outlook_server와 같은
+3티어 안전 등급을 따릅니다:
+    🟢 읽기 — 모든 read_*/describe_*/find_*/inspect_*/list_* 도구 (문서를 변경하지 않음)
+    🟡 메모리 수정(저장 안 함) — write_excel_cell/write_excel_range,
+       replace_word_text/set_word_paragraph/write_word_paragraph/delete_word_paragraph/
+       set_word_table_cell, set_powerpoint_text. **사용자 세션에 열려 있는** 문서만
+       수정하고 디스크에는 쓰지 않는다(저장 전까지 파일 원본은 그대로).
+       주의: Excel의 COM 수정은 실행 취소(Ctrl+Z) 스택에 쌓이지 않는다. 그래서 모든
+       쓰기 도구가 복구용으로 '바꾸기 전 값'을 응답에 담아 돌려준다.
+    🔴 디스크 기록 — save_workbook / save_word_document / save_presentation
+       (덮어쓰기 저장). confirm=True 없이는 실행되지 않고 무엇을 할지 프리뷰만
+       돌려준다(_preview — outlook/catia와 같은 게이트).
+
+쓰기 도구는 백그라운드 읽기 전용 인스턴스(_document)를 쓰지 않고 _writable로 **열려
+있는 문서만** 잡는다 — 안 열린 파일을 백그라운드로 열어 고치면 닫을 때 변경이 조용히
+버려지기 때문이다. 이 구분을 깨지 말 것.
 
 path 인자 규칙 (모든 문서 도구 공통)
     path=None  -> 해당 앱에서 지금 활성화된 문서를 읽습니다.
@@ -53,12 +60,16 @@ except ImportError as e:  # Windows가 아니거나 pywin32 미설치
 mcp = FastMCP(
     name="office",
     instructions=(
-        "Word/Excel/PowerPoint 문서를 읽고 Excel 셀을 수정하는 MCP 서버입니다. "
-        "path를 생략하면 지금 열려 있는 활성 문서를 읽습니다. "
+        "Word/Excel/PowerPoint 문서를 읽고 수정하는 MCP 서버입니다. "
+        "path를 생략하면 지금 열려 있는 활성 문서를 다룹니다. "
         "어떤 문서가 열려 있는지 모르면 list_open_documents를 먼저 호출하세요. "
-        "Excel 쓰기(write_excel_cell/write_excel_range)는 열려 있는 통합문서의 메모리만 "
-        "바꾸고 저장하지 않습니다 — 디스크 저장은 save_workbook이 담당하며 confirm=True "
-        "없이 부르면 프리뷰만 돌려줍니다."
+        "편집 흐름: 먼저 읽어서 무엇을 바꿀지 정한 뒤(Excel은 read_excel_range, Word는 "
+        "read_word_document/find_in_word로 단락 번호 확인, PowerPoint는 "
+        "list_powerpoint_shapes로 도형 번호 확인) 해당 쓰기 도구를 부릅니다. "
+        "쓰기 도구는 **그 앱에 열려 있는 문서만** 수정하며 메모리만 바꾸고 저장하지 "
+        "않습니다 — 디스크 저장은 save_workbook / save_word_document / save_presentation이 "
+        "담당하고 confirm=True 없이 부르면 프리뷰만 돌려줍니다. 저장하기 전에는 "
+        "'수정했다'고만 말하고 '저장했다'고 하지 마세요."
     ),
 )
 
@@ -492,6 +503,15 @@ def _grid_to_markdown(grid, start_row: int, start_col: int, max_rows: int, max_c
     if notes:
         out += "\n\n(" + " / ".join(notes) + ")"
     return out
+
+
+def _safe_attr(obj, attr: str) -> str:
+    """COM 속성을 문자열로 안전하게 읽는다. 실패하면 빈 문자열."""
+    try:
+        v = getattr(obj, attr)
+        return "" if v is None else str(v).strip()
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -1058,32 +1078,79 @@ def _preview(action: str, details: list[str], tool_hint: str = "") -> str:
     return "\n".join(lines).rstrip()
 
 
-def _writable_workbook(path: str):
-    """수정 대상 통합문서를 돌려준다 — 반드시 사용자 세션에 열려 있는 것만.
+_WRITABLE_LABEL = {
+    "excel": ("Excel", "통합문서"),
+    "word": ("Word", "문서"),
+    "ppt": ("PowerPoint", "발표자료"),
+}
 
-    path 비움 → 활성 통합문서. path 지정 → Excel에 열려 있으면 그 문서, 아니면
-    안내와 함께 실패한다(백그라운드로 열어 수정하면 변경이 버려지므로 열지 않는다).
-    읽기 전용으로 열린 통합문서도 거절한다.
+
+def _writable(kind: str, path: str):
+    """수정 대상 문서를 돌려준다 — 반드시 사용자 세션에 열려 있는 것만.
+
+    path 비움 → 활성 문서. path 지정 → 해당 앱에 열려 있으면 그 문서, 아니면 안내와
+    함께 실패한다(백그라운드로 열어 수정하면 닫을 때 변경이 조용히 버려지므로 열지
+    않는다 — 이게 쓰기 도구가 _document를 쓰지 않는 이유다). 읽기 전용으로 열린
+    문서도 거절한다.
     """
+    app_label, doc_label = _WRITABLE_LABEL[kind]
     if not path:
-        wb = _active_doc("excel")
+        doc = _active_doc(kind)
     else:
         p = os.path.abspath(os.path.expanduser(path))
-        wb = _find_open_doc("excel", p)
-        if wb is None:
+        doc = _find_open_doc(kind, p)
+        if doc is None:
             raise OfficeError(
-                f"'{p}'이(가) Excel에 열려 있지 않습니다. 쓰기 도구는 열려 있는 통합문서만 "
-                "수정합니다(안 열린 파일을 백그라운드로 열어 쓰면 변경이 버려집니다). "
-                "Excel에서 파일을 연 뒤 다시 시도하세요."
+                f"'{p}'이(가) {app_label}에 열려 있지 않습니다. 쓰기 도구는 열려 있는 "
+                f"{doc_label}만 수정합니다(안 열린 파일을 백그라운드로 열어 쓰면 변경이 "
+                f"버려집니다). {app_label}에서 파일을 연 뒤 다시 시도하세요."
             )
     try:
-        ro = bool(wb.ReadOnly)
+        # PowerPoint는 msoTrue(-1)/msoFalse(0)을 주는데 bool()로 그대로 판정된다.
+        ro = bool(doc.ReadOnly)
     except Exception:  # noqa: BLE001 — 확인 불가면 일단 진행(쓰기 시점에 오류로 드러남)
         ro = False
     if ro:
-        raise OfficeError(f"'{wb.Name}'은(는) 읽기 전용으로 열려 있어 수정할 수 없습니다.")
+        raise OfficeError(f"'{doc.Name}'은(는) 읽기 전용으로 열려 있어 수정할 수 없습니다.")
     _ctx.user_session = True
-    return wb
+    return doc
+
+
+def _writable_workbook(path: str):
+    """수정 대상 Excel 통합문서 (기존 이름 유지 — Excel 쓰기 도구들이 쓴다)."""
+    return _writable("excel", path)
+
+
+def _save_open_document(kind: str, path: str, confirm: bool, tool_name: str) -> str:
+    """🔴 열려 있는 문서를 현재 경로에 저장한다 (Excel/Word/PowerPoint 공용).
+
+    confirm 없이 부르면 무엇을 덮어쓸지 프리뷰만 돌려준다. 아직 한 번도 저장된 적 없는
+    새 문서는 경로가 없어 저장할 수 없다 — 앱에서 '다른 이름으로 저장'을 먼저 해야 한다.
+    """
+    app_label, doc_label = _WRITABLE_LABEL[kind]
+    doc = _writable(kind, path)
+    try:
+        full = doc.FullName
+    except Exception:  # noqa: BLE001
+        full = ""
+    if not full or full == doc.Name or not os.path.isabs(full):
+        # 세 라벨(통합문서/문서/발표자료) 모두 받침이 없어 '는'으로 붙는다.
+        return (
+            f"이 {doc_label}는 아직 디스크에 저장된 적이 없어 경로가 없습니다. "
+            f"{app_label}에서 먼저 '다른 이름으로 저장'해 경로를 정하세요."
+        )
+    changed = ""
+    try:
+        changed = "변경 있음(미저장)" if not doc.Saved else "변경 없음(이미 저장됨)"
+    except Exception:  # noqa: BLE001
+        pass
+    if not confirm:
+        details = [f"{doc_label}: {doc.Name}", f"경로: {full} (덮어쓰기)"]
+        if changed:
+            details.append(f"상태: {changed}")
+        return _preview(f"{doc_label} 저장(덮어쓰기)", details, f"({tool_name} ... confirm=true)")
+    doc.Save()
+    return f"저장 완료.\n  경로: {full}"
 
 
 def _coerce_cell_value(value, as_text: bool):
@@ -1228,28 +1295,7 @@ def save_workbook(path: str = "", confirm: bool = False) -> str:
         path: 파일 경로. 생략하면 활성 통합문서. Excel에 열려 있어야 합니다.
         confirm: 실제 저장하려면 True. 없으면 프리뷰만.
     """
-    wb = _writable_workbook(path)
-    try:
-        full = wb.FullName
-    except Exception:  # noqa: BLE001
-        full = ""
-    if not full or full == wb.Name or not os.path.isabs(full):
-        return (
-            "이 통합문서는 아직 디스크에 저장된 적이 없어 경로가 없습니다. "
-            "Excel에서 먼저 '다른 이름으로 저장'해 경로를 정하세요."
-        )
-    changed = ""
-    try:
-        changed = "변경 있음(미저장)" if not wb.Saved else "변경 없음(이미 저장됨)"
-    except Exception:  # noqa: BLE001
-        pass
-    if not confirm:
-        details = [f"통합문서: {wb.Name}", f"경로: {full} (덮어쓰기)"]
-        if changed:
-            details.append(f"상태: {changed}")
-        return _preview("통합문서 저장(덮어쓰기)", details, "(save_workbook ... confirm=true)")
-    wb.Save()
-    return f"저장 완료.\n  경로: {full}"
+    return _save_open_document("excel", path, confirm, "save_workbook")
 
 
 def _word_page_count(doc) -> int:
@@ -1570,6 +1616,243 @@ def find_in_word(
         return f"{head}\n\n{len(hits)}개 발견:\n" + "\n".join(hits) + note
 
 
+# ─────────────── Word 쓰기 (🟡 메모리 수정 / 🔴 저장 — Excel과 같은 3티어) ───────────────
+# Excel 쓰기와 규약이 같다: **사용자 세션에 열려 있는 문서만**(_writable) 고치고, 디스크
+# 기록은 save_word_document(confirm 게이트)가 따로 담당한다. 바꾸기 전 내용을 응답에
+# 돌려주는 것도 같다 — Word는 보통 Ctrl+Z에 자동화 편집이 쌓이지만 그걸 믿고 복구
+# 수단을 안 주지는 않는다.
+#
+# ⚠ 실기 검증 대상: 아래 COM 관용구(Find.Execute 위치 인자, 단락 기호 처리)는 개발 PC에
+# Word가 없어 실기에서 확인하지 못했다. 표시된 곳을 사내 PC에서 확인할 것.
+
+WD_CHARACTER = 1      # wdCharacter (Range.MoveEnd 단위)
+WD_REPLACE_ALL = 2    # wdReplaceAll
+WD_FIND_CONTINUE = 1  # wdFindContinue
+
+
+def _set_paragraph_text(doc, index: int, text: str) -> str:
+    """단락 하나의 본문을 바꾸고 '바꾸기 전 텍스트'를 돌려준다.
+
+    ⚠ 단락 Range에는 끝의 단락 기호(¶)가 포함돼 있다. 그대로 Text에 대입하면 기호까지
+    덮어써서 **다음 단락과 합쳐진다**. MoveEnd로 기호를 범위에서 뺀 뒤 바꾼다.
+    """
+    rng = doc.Paragraphs(index).Range
+    old = _clean(rng.Text)
+    rng.MoveEnd(WD_CHARACTER, -1)  # ⚠ 실기 검증 대상: 단락 기호 제외
+    rng.Text = text
+    return old
+
+
+def _check_paragraph(doc, index: int) -> int:
+    total = doc.Paragraphs.Count
+    if not (1 <= index <= total):
+        raise OfficeError(f"단락 번호는 1~{total} 사이여야 합니다 (받은 값: {index}). "
+                          "read_word_document로 본문을, read_word_outline으로 구조를 확인하세요.")
+    return total
+
+
+@mcp.tool()
+@office_tool
+def replace_word_text(
+    find: str, replace: str, path: str = "",
+    match_case: bool = False, whole_word: bool = False,
+) -> str:
+    """🟡 열려 있는 Word 문서에서 문자열을 찾아 바꿉니다 (저장하지 않음).
+
+    문서 전체에서 일치하는 곳을 모두 바꿉니다. 디스크에는 쓰지 않으며, 파일 반영은
+    save_word_document(confirm 필요)가 담당합니다.
+
+    Args:
+        find: 찾을 문자열.
+        replace: 바꿀 문자열. 빈 문자열이면 찾은 곳을 지웁니다.
+        path: 파일 경로. 생략하면 활성 문서. **Word에 열려 있어야 합니다.**
+        match_case: 대소문자를 구분할지.
+        whole_word: 단어 단위로만 일치시킬지.
+
+    Returns:
+        바꾼 개수와 바뀐 자리의 앞뒤 맥락 일부.
+    """
+    if not find:
+        raise OfficeError("찾을 문자열(find)이 비어 있습니다.")
+    doc = _writable("word", path)
+    before = _clean(doc.Content.Text)
+    hits = before.count(find) if match_case else before.lower().count(find.lower())
+    if hits == 0:
+        return (f"문서: {_doc_label(doc, path)}\n\n'{find}'을(를) 찾지 못해 아무 것도 "
+                "바꾸지 않았습니다.")
+
+    # ⚠ 실기 검증 대상: Find.Execute는 **위치 인자**로 넘긴다. pywin32 동적 디스패치는
+    # 일부 메서드에서 키워드 인자를 조용히 흘려버려(문서 열기의 Password와 같은 문제)
+    # 지정하지 않은 것처럼 동작한다.
+    # (FindText, MatchCase, MatchWholeWord, MatchWildcards, MatchSoundsLike,
+    #  MatchAllWordForms, Forward, Wrap, Format, ReplaceWith, Replace)
+    finder = doc.Content.Find
+    finder.ClearFormatting()
+    finder.Replacement.ClearFormatting()
+    finder.Execute(find, bool(match_case), bool(whole_word), False, False, False,
+                   True, WD_FIND_CONTINUE, False, replace, WD_REPLACE_ALL)
+
+    # 개수는 '바꾸기 전 개수 - 남은 개수'로 센다. 단, 바꿀 문자열이 찾는 문자열을 품고
+    # 있으면(가나다 → 가나다라) 바꾼 자리에도 계속 걸려 차감이 0이 된다 — 그때는
+    # ReplaceAll이 전부 바꿨다고 보고 처음 센 개수를 쓴다.
+    note = ""
+    if replace and find in replace:
+        done = hits
+        note = "  (바꿀 문자열이 찾는 문자열을 포함해 개수는 추정입니다)\n"
+    else:
+        after = _clean(doc.Content.Text)
+        remaining = after.count(find) if match_case else after.lower().count(find.lower())
+        done = max(0, hits - remaining)
+    return (
+        f"찾아바꾸기 완료: {done}곳 (문서: {_doc_label(doc, path)})\n"
+        f"  '{find}' → '{replace or '(삭제)'}'\n"
+        f"{note}"
+        "아직 저장하지 않았습니다 — 파일에 반영하려면 save_word_document를 호출하세요."
+    )
+
+
+@mcp.tool()
+@office_tool
+def set_word_paragraph(paragraph_index: int, text: str, path: str = "") -> str:
+    """🟡 열려 있는 Word 문서의 단락 하나를 새 내용으로 바꿉니다 (저장하지 않음).
+
+    단락 번호는 read_word_document로 본문을 읽어 세거나, find_in_word가 돌려주는
+    '[단락 N]' 표시에서 얻습니다.
+
+    Args:
+        paragraph_index: 바꿀 단락 번호(1부터).
+        text: 새 본문.
+        path: 파일 경로. 생략하면 활성 문서. **Word에 열려 있어야 합니다.**
+
+    Returns:
+        바꾸기 전 내용(복구용)과 바꾼 후 내용.
+    """
+    doc = _writable("word", path)
+    total = _check_paragraph(doc, paragraph_index)
+    old = _set_paragraph_text(doc, paragraph_index, text)
+    return (
+        f"단락 {paragraph_index}/{total} 수정 (문서: {_doc_label(doc, path)})\n"
+        f"  이전: {_truncate(old, 300) or '(빈 단락)'}\n"
+        f"  이후: {_truncate(text, 300)}\n"
+        "아직 저장하지 않았습니다 — 파일에 반영하려면 save_word_document를 호출하세요."
+    )
+
+
+@mcp.tool()
+@office_tool
+def write_word_paragraph(text: str, path: str = "", after_paragraph: int = 0) -> str:
+    """🟡 열려 있는 Word 문서에 단락을 새로 넣습니다 (저장하지 않음).
+
+    Args:
+        text: 넣을 본문.
+        path: 파일 경로. 생략하면 활성 문서. **Word에 열려 있어야 합니다.**
+        after_paragraph: 이 단락 **뒤에** 넣습니다. 0(기본)이면 문서 맨 끝에 붙입니다.
+
+    Returns:
+        새로 만들어진 단락의 번호와 내용.
+    """
+    doc = _writable("word", path)
+    total = doc.Paragraphs.Count
+    # ⚠ 실기 검증 대상: InsertParagraphAfter 후 번호 증가
+    if after_paragraph <= 0 or after_paragraph >= total:
+        doc.Content.InsertParagraphAfter()
+        index = doc.Paragraphs.Count
+    else:
+        doc.Paragraphs(after_paragraph).Range.InsertParagraphAfter()
+        index = after_paragraph + 1
+    _set_paragraph_text(doc, index, text)
+    return (
+        f"단락 추가: {index}번째 (총 {doc.Paragraphs.Count}단락, "
+        f"문서: {_doc_label(doc, path)})\n"
+        f"  내용: {_truncate(text, 300)}\n"
+        "아직 저장하지 않았습니다 — 파일에 반영하려면 save_word_document를 호출하세요."
+    )
+
+
+@mcp.tool()
+@office_tool
+def delete_word_paragraph(paragraph_index: int, path: str = "") -> str:
+    """🟡 열려 있는 Word 문서의 단락 하나를 지웁니다 (저장하지 않음).
+
+    지운 내용을 응답에 돌려주므로, 되돌리려면 그 내용으로 write_word_paragraph를
+    부르면 됩니다(서식은 복구되지 않습니다).
+
+    Args:
+        paragraph_index: 지울 단락 번호(1부터).
+        path: 파일 경로. 생략하면 활성 문서. **Word에 열려 있어야 합니다.**
+
+    Returns:
+        지워진 내용(복구용).
+    """
+    doc = _writable("word", path)
+    total = _check_paragraph(doc, paragraph_index)
+    rng = doc.Paragraphs(paragraph_index).Range
+    old = _clean(rng.Text)
+    rng.Delete()  # 단락 기호까지 지워 단락 자체가 사라진다
+    return (
+        f"단락 {paragraph_index}/{total} 삭제 (문서: {_doc_label(doc, path)})\n"
+        f"  지운 내용: {_truncate(old, 500) or '(빈 단락)'}\n"
+        "아직 저장하지 않았습니다 — 파일에 반영하려면 save_word_document를 호출하세요."
+    )
+
+
+@mcp.tool()
+@office_tool
+def set_word_table_cell(
+    table_index: int, row: int, column: int, text: str, path: str = ""
+) -> str:
+    """🟡 열려 있는 Word 문서의 표 셀 하나를 바꿉니다 (저장하지 않음).
+
+    표 번호·행·열은 read_word_tables로 확인하세요(표는 1번부터, 행/열도 1부터).
+
+    Args:
+        table_index: 표 번호(1부터).
+        row: 행 번호(1부터).
+        column: 열 번호(1부터).
+        text: 새 셀 내용.
+        path: 파일 경로. 생략하면 활성 문서. **Word에 열려 있어야 합니다.**
+
+    Returns:
+        바꾸기 전 셀 내용(복구용)과 바꾼 후 내용.
+    """
+    doc = _writable("word", path)
+    total = doc.Tables.Count
+    if not (1 <= table_index <= total):
+        raise OfficeError(f"표 번호는 1~{total} 사이여야 합니다. (전체 {total}개 — "
+                          "read_word_tables로 확인하세요)")
+    table = doc.Tables(table_index)
+    try:
+        cell = table.Cell(row, column)
+    except pythoncom.com_error:
+        raise OfficeError(
+            f"표 {table_index}에 {row}행 {column}열이 없습니다 "
+            f"({table.Rows.Count}행 × {table.Columns.Count}열). 병합된 셀일 수도 있습니다."
+        )
+    old = _clean(cell.Range.Text)
+    cell.Range.Text = text  # 셀 Range는 대입해도 셀 경계를 넘지 않는다
+    return (
+        f"표 {table_index} {row}행 {column}열 수정 (문서: {_doc_label(doc, path)})\n"
+        f"  이전: {_truncate(old, 200) or '(빈 셀)'}\n"
+        f"  이후: {_truncate(text, 200)}\n"
+        "아직 저장하지 않았습니다 — 파일에 반영하려면 save_word_document를 호출하세요."
+    )
+
+
+@mcp.tool()
+@office_tool
+def save_word_document(path: str = "", confirm: bool = False) -> str:
+    """🔴 열려 있는 Word 문서를 현재 경로에 저장합니다(덮어쓰기). (confirm=True 필요)
+
+    replace_word_text/set_word_paragraph 등으로 바꾼 내용을 디스크에 반영하는 단계입니다.
+    confirm 없이 부르면 어떤 파일을 덮어쓸지 프리뷰만 돌려줍니다.
+
+    Args:
+        path: 파일 경로. 생략하면 활성 문서. Word에 열려 있어야 합니다.
+        confirm: 실제 저장하려면 True. 없으면 프리뷰만.
+    """
+    return _save_open_document("word", path, confirm, "save_word_document")
+
+
 # ──────────────────────────── PowerPoint 도구 ────────────────────────────
 
 
@@ -1773,6 +2056,122 @@ def read_powerpoint_tables(
             return f"발표자료: {_doc_label(pres, path)}\n\n표가 있는 슬라이드가 없습니다."
         out.insert(1, f"표 {found}개")
         return _truncate("\n".join(out), MAX_CHARS)
+
+
+@mcp.tool()
+@office_tool
+def list_powerpoint_shapes(slide: int, path: str = "", password: str = "") -> str:
+    """슬라이드 하나의 도형 목록을 번호와 함께 조회합니다. (🟢 읽기)
+
+    set_powerpoint_text에 넘길 **도형 번호**를 여기서 얻습니다. 어느 도형이 제목이고
+    어느 게 본문인지, 텍스트를 넣을 수 있는 도형인지 확인하는 용도입니다.
+
+    Args:
+        slide: 슬라이드 번호(1부터).
+        path: 파일 경로. 생략하면 활성 발표자료.
+        password: 발표자료에 열기 암호가 걸려 있을 때 지정합니다.
+
+    Returns:
+        도형별 번호·이름·텍스트 가능 여부와 현재 내용 앞부분.
+    """
+    with _document("ppt", path, password) as pres:
+        total = pres.Slides.Count
+        if not (1 <= slide <= total):
+            raise OfficeError(f"슬라이드 번호는 1~{total} 사이여야 합니다 (받은 값: {slide}).")
+        sld = pres.Slides(slide)
+        out = [f"발표자료: {_doc_label(pres, path)}  |  슬라이드 {slide}/{total}", ""]
+        count = sld.Shapes.Count
+        if count == 0:
+            return "\n".join(out) + "\n이 슬라이드에는 도형이 없습니다."
+        for i in range(1, count + 1):
+            shape = sld.Shapes(i)
+            name = _safe_attr(shape, "Name") or "(이름 없음)"
+            marks = []
+            text = ""
+            try:
+                if shape.HasTextFrame and shape.TextFrame.HasText:
+                    text = _clean(shape.TextFrame.TextRange.Text)
+                    marks.append("텍스트")
+                elif shape.HasTextFrame:
+                    marks.append("텍스트(비어 있음)")
+            except Exception:  # noqa: BLE001
+                pass
+            for label, attr in (("표", "HasTable"), ("차트", "HasChart")):
+                try:
+                    if getattr(shape, attr):
+                        marks.append(label)
+                except Exception:  # noqa: BLE001
+                    pass
+            mark = f"  <{', '.join(marks)}>" if marks else ""
+            out.append(f"  [{i}] {name}{mark}")
+            if text:
+                out.append(f"      {_truncate(text, 200)}")
+        out.append("")
+        out.append("텍스트를 바꾸려면 set_powerpoint_text(slide, shape, text)를 쓰세요.")
+        return _truncate("\n".join(out), MAX_CHARS)
+
+
+# ─────────── PowerPoint 쓰기 (🟡 메모리 수정 / 🔴 저장 — Excel/Word와 같은 3티어) ───────────
+
+
+@mcp.tool()
+@office_tool
+def set_powerpoint_text(slide: int, shape: int, text: str, path: str = "") -> str:
+    """🟡 열려 있는 발표자료의 텍스트 도형 하나를 바꿉니다 (저장하지 않음).
+
+    슬라이드·도형 번호는 list_powerpoint_shapes로 확인하세요. 디스크 기록은
+    save_presentation(confirm 필요)이 담당합니다.
+
+    Args:
+        slide: 슬라이드 번호(1부터).
+        shape: 도형 번호(1부터 — list_powerpoint_shapes의 번호).
+        text: 새 텍스트. 줄바꿈(\\n)으로 여러 줄을 넣을 수 있습니다.
+        path: 파일 경로. 생략하면 활성 발표자료. **PowerPoint에 열려 있어야 합니다.**
+
+    Returns:
+        바꾸기 전 내용(복구용)과 바꾼 후 내용.
+    """
+    pres = _writable("ppt", path)
+    total = pres.Slides.Count
+    if not (1 <= slide <= total):
+        raise OfficeError(f"슬라이드 번호는 1~{total} 사이여야 합니다 (받은 값: {slide}).")
+    sld = pres.Slides(slide)
+    shapes = sld.Shapes
+    if not (1 <= shape <= shapes.Count):
+        raise OfficeError(
+            f"슬라이드 {slide}의 도형 번호는 1~{shapes.Count} 사이여야 합니다 "
+            "(list_powerpoint_shapes로 확인하세요)."
+        )
+    target = shapes(shape)
+    try:
+        has_frame = bool(target.HasTextFrame)
+    except Exception:  # noqa: BLE001
+        has_frame = False
+    if not has_frame:
+        raise OfficeError(
+            f"슬라이드 {slide}의 도형 {shape}에는 텍스트를 넣을 수 없습니다"
+            "(그림·선 등). list_powerpoint_shapes에서 '텍스트' 표시가 있는 도형을 고르세요."
+        )
+    old = _clean(target.TextFrame.TextRange.Text)
+    target.TextFrame.TextRange.Text = text
+    return (
+        f"슬라이드 {slide} / 도형 {shape} 수정 (발표자료: {_doc_label(pres, path)})\n"
+        f"  이전: {_truncate(old, 300) or '(빈 도형)'}\n"
+        f"  이후: {_truncate(text, 300)}\n"
+        "아직 저장하지 않았습니다 — 파일에 반영하려면 save_presentation을 호출하세요."
+    )
+
+
+@mcp.tool()
+@office_tool
+def save_presentation(path: str = "", confirm: bool = False) -> str:
+    """🔴 열려 있는 발표자료를 현재 경로에 저장합니다(덮어쓰기). (confirm=True 필요)
+
+    Args:
+        path: 파일 경로. 생략하면 활성 발표자료. PowerPoint에 열려 있어야 합니다.
+        confirm: 실제 저장하려면 True. 없으면 프리뷰만.
+    """
+    return _save_open_document("ppt", path, confirm, "save_presentation")
 
 
 if __name__ == "__main__":

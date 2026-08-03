@@ -33,11 +33,25 @@ _SKIP_SUFFIX = ("_status",)
 
 # 무엇을 한 도구인지 (앞에 오는 것이 우선 — save가 write보다 먼저다)
 _SAVE_HINTS = ("save", "export")
-_WRITE_HINTS = ("write", "set_", "apply", "create", "delete", "move", "insert", "update")
+# 'replace'가 빠지면 replace_word_text(찾아바꾸기)가 '읽음'으로 기록돼, 문서를 고쳐 놓고도
+# 미저장 경고가 안 뜬다. 새 쓰기 도구를 만들면 여기에 동사를 추가할 것.
+_WRITE_HINTS = ("write", "set_", "replace", "apply", "create", "delete", "move",
+                "insert", "update")
 
 # 대장에 세부를 적을 때 볼 인자들 (순서 유지)
-_DETAIL_KEYS = ("sheet", "cell_range", "cell", "start_cell", "pages", "slides",
-                "table_index", "kind")
+_DETAIL_KEYS = ("sheet", "cell_range", "cell", "start_cell", "pages", "slides", "slide",
+                "shape", "paragraph_index", "table_index", "row", "column", "kind")
+
+# 확장자 → 그 문서를 디스크에 쓰는 🔴 도구. 미저장 경고에서 **어느 저장 도구를 불러야
+# 하는지** 콕 집어 주기 위한 것이다(도구가 셋이라 뭉뚱그리면 약한 모델이 틀린 걸 부른다).
+_SAVE_TOOL_BY_EXT = {
+    ".xlsx": "save_workbook", ".xls": "save_workbook",
+    ".xlsm": "save_workbook", ".xlsb": "save_workbook",
+    ".docx": "save_word_document", ".doc": "save_word_document",
+    ".docm": "save_word_document",
+    ".pptx": "save_presentation", ".ppt": "save_presentation",
+    ".pptm": "save_presentation",
+}
 
 READ, WRITE, SAVE = "읽음", "수정", "저장"
 
@@ -161,7 +175,7 @@ def render(conv: dict, settings: dict) -> str:
         return ""
     now = sum(1 for m in conv.get("messages", []) if m.get("role") == "user")
     lines = []
-    unsaved = False
+    save_tools: set[str] = set()
     for e in log:
         ago = now - int(e.get("turn", now))
         when = "방금" if ago <= 0 else f"{ago}턴 전"
@@ -169,8 +183,12 @@ def render(conv: dict, settings: dict) -> str:
         mark = ""
         if e["action"] == WRITE and not e.get("saved"):
             mark = "  ⚠ 아직 저장되지 않음"
-            unsaved = True
+            ext = os.path.splitext(e.get("label", ""))[1].lower()
+            save_tools.add(_SAVE_TOOL_BY_EXT.get(ext, ""))
         lines.append(f"- {e['label']}  {e['action']}{detail}  ({when}){mark}")
+    unsaved = bool(save_tools)
+    # 확장자를 못 알아본 경우('(활성 문서)' 등)는 셋 다 알려 준다.
+    named = sorted(t for t in save_tools if t) or sorted(set(_SAVE_TOOL_BY_EXT.values()))
 
     out = [
         "[작업 중인 문서] 이 대화에서 이미 다룬 문서다. 아래를 참고해 **같은 내용을 다시 "
@@ -180,6 +198,7 @@ def render(conv: dict, settings: dict) -> str:
     if unsaved:
         out.append(
             "⚠ 저장되지 않은 변경이 있다. 메모리에만 반영된 상태이므로 '저장했다'고 "
-            "말하지 마라. 사용자가 저장을 원하면 save_workbook을 confirm=true로 호출한다."
+            f"말하지 마라. 사용자가 저장을 원하면 {' 또는 '.join(named)}를 "
+            "confirm=true로 호출한다."
         )
     return "\n".join(out)

@@ -40,7 +40,9 @@ pywin32(COM)로 **이미 로그인·실행 중인** Office/Outlook을 직접 조
 - **우아한 저하** — pywin32가 없으면(`COM_AVAILABLE=False`) 서버는 정상적으로 뜨고 모든 도구가 실패 사유를 담은 안내 메시지를 반환한다. import 에러로 죽지 않는다.
 - `path=""` → 지금 활성화된 문서, `path` 지정 → 열려 있으면 그 세션, 아니면 백그라운드에서 읽기 전용으로 열었다 닫는다. 암호 걸린 문서는 `password` 인자로 넘긴다 (대화상자 대신 오류 메시지로 물러선다).
 
-`office_server.py`는 Word/PowerPoint **읽기 전용** + Excel 쓰기(3티어)다: 🟢 읽기(read_* 등 18개) / 🟡 메모리 수정(`write_excel_cell`·`write_excel_range` — **사용자 세션에 열려 있는** 통합문서만, 저장 안 함. COM 수정은 Excel Ctrl+Z에 안 쌓여서 이전 값을 응답으로 돌려준다) / 🔴 디스크 기록(`save_workbook` — confirm 게이트). 쓰기 도구는 백그라운드 읽기 전용 인스턴스(`_document`)를 쓰지 않고 `_writable_workbook`으로 열린 문서만 잡는다 — 이 구분을 깨지 말 것.
+`office_server.py`는 Excel/Word/PowerPoint **모두 읽기+편집**을 지원한다(도구 30개, 3티어): 🟢 읽기(read_*/find_*/inspect_*/list_* 19개) / 🟡 메모리 수정(Excel `write_excel_cell`·`write_excel_range`, Word `replace_word_text`·`set_word_paragraph`·`write_word_paragraph`·`delete_word_paragraph`·`set_word_table_cell`, PPT `set_powerpoint_text` — **사용자 세션에 열려 있는** 문서만, 저장 안 함. Excel의 COM 수정은 Ctrl+Z에 안 쌓이므로 모든 쓰기 도구가 '바꾸기 전 값'을 응답으로 돌려준다) / 🔴 디스크 기록(`save_workbook`·`save_word_document`·`save_presentation` — confirm 게이트, 공용 `_save_open_document`). 쓰기 도구는 백그라운드 읽기 전용 인스턴스(`_document`)를 쓰지 않고 **`_writable(kind, path)`로 열린 문서만** 잡는다 — 이 구분을 깨지 말 것(안 열린 파일을 백그라운드로 열어 고치면 닫을 때 변경이 조용히 버려진다).
+  - Word 편집의 COM 함정 둘: **단락 Range에는 끝의 ¶가 포함**돼 그냥 `Range.Text`에 대입하면 다음 단락과 합쳐진다(`_set_paragraph_text`가 `MoveEnd(wdCharacter, -1)`로 뺀다). `Find.Execute`는 **위치 인자 11개**로 넘긴다 — pywin32 동적 디스패치가 일부 메서드에서 키워드를 조용히 흘리는 문제(문서 열기의 `Password`와 같은 함정)를 피하기 위해서다. ⚠ 개발 PC에 Word가 없어 이 관용구들은 실기 미검증이다(`⚠ 실기 검증 대상` 주석 위치를 사내 PC에서 확인할 것).
+  - 새 쓰기 도구를 만들면 `llm_studio/server/worklog.py`의 `_WRITE_HINTS`에 그 동사를 넣을 것. 빠지면 '읽음'으로 기록돼 미저장 경고가 안 뜬다(`replace`가 실제로 그랬다).
 
 `outlook_server.py`는 쓰기가 가능해서 **3티어 안전 등급**을 따른다:
 - 🟢 읽기 — 목록/검색/상세/첨부 저장/일정·연락처·작업 조회
