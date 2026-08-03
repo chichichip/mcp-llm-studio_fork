@@ -95,6 +95,36 @@ build_exe.bat               # → dist\LocalLLMStudio\
 
 ## MCP 서버 등록
 
+### 같은 저장소의 서버는 자동으로 붙는다 (bat 실행 불필요)
+
+**처음 실행할 때** `mcp_servers.json`이 없으면, 같은 저장소의 `mcp_server/` 서버들을
+앱이 **자식 프로세스(stdio)로 직접 띄우도록** 자동 등록한다. `run_office_server.bat`
+같은 걸 따로 열어 둘 필요가 없다 — 앱만 켜면 도구가 붙고, 앱을 끄면 같이 정리된다.
+
+| 등록 이름 | 서버 | 기본 |
+|---|---|---|
+| `office` | office_server.py | 켬 |
+| `outlook` | outlook_server.py | 켬 |
+| `docs` | rag_server.py | 켬 |
+| `pdf` | pdf_server.py | 켬 |
+| `catia` | catia_server.py | **끔** (CATIA 설치 PC에서만 켤 것) |
+| `ansys` | ansys_server.py | **끔** (ANSYS 설치 PC에서만 켤 것) |
+
+- CATIA/ANSYS를 기본으로 꺼 두는 이유: 그 제품이 없는 PC에서는 도구 목록만 길어지고,
+  도구가 많아질수록 약한 로컬 모델의 도구 선택 정확도가 떨어진다. 설정 → MCP에서 켠다.
+- 서버를 띄우는 파이썬은 **루트 공용 `venv\Scripts\python.exe`**를 먼저 찾고, 없으면
+  지금 앱을 돌리는 파이썬을 쓴다 (bat들의 `..\venv` 규약과 같다).
+- COM 서버(office/outlook)의 '사용자 로그인 세션' 제약은 그대로 지켜진다 — 앱이 그
+  세션에서 돌고 자식 프로세스가 세션을 물려받기 때문이다.
+- ⚠ `docs`(rag_server)가 떠 있는 동안은 Qdrant 잠금 때문에 `run_rag_indexer.bat`이
+  시작을 거부한다. 인덱싱할 때는 앱을 잠시 끄거나 설정에서 `docs`를 꺼 둘 것.
+
+**이미 쓰던 설정이 있으면 자동 등록은 개입하지 않는다.** HTTP 주소(`url`)로 등록해
+쓰던 사람이 옮겨오려면 설정(⚙) → MCP → **[🔌 번들 서버 자동 설정]**을 누르면 편집기에
+자동 설정이 채워진다. 확인한 뒤 [MCP 저장 + 재연결]을 눌러야 실제로 바뀐다.
+
+### 직접 등록
+
 설정(⚙) → MCP 항목에서 편집하거나 `mcp_servers.json`을 직접 수정:
 
 ```json
@@ -108,8 +138,12 @@ build_exe.bat               # → dist\LocalLLMStudio\
 ```
 
 - `url` → streamable_http, `command` → stdio 방식으로 연결
-- 연결 실패한 서버는 건너뛰고 나머지로 동작 (앱이 죽지 않음)
+- 연결 실패한 서버는 건너뛰고 나머지로 동작 (앱이 죽지 않음). 30초 안에 응답하지
+  않는 서버도 그 서버만 포기하고 넘어간다 — 하나가 멈춰서 앱이 못 뜨는 일은 없다.
 - 도구 이름은 `서버이름__도구이름`으로 모델에 노출됨
+- n8n 등 **다른 클라이언트**가 붙어야 하면 그때는 여전히 `run_*.bat`으로 HTTP 서버를
+  띄운다 (bat은 그 용도로 남아 있다). 같은 서버를 앱과 n8n이 동시에 쓸 일이 있으면
+  bat으로 HTTP를 띄우고 앱에는 `url`로 등록하는 편이 낫다.
 
 ## 외부 LLM 연결 (API 키)
 

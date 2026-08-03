@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -86,6 +87,79 @@ RESTART_KEYS = {"ctx", "kv_quant", "model_path", "model_alias", "llama_port",
 
 DEFAULT_MCP_CONFIG = {"mcpServers": {}}
 
+# 같은 저장소의 mcp_server/ 서버들을 앱이 **자식 프로세스(stdio)로 직접 띄우기** 위한 목록.
+# 이게 있으면 run_*.bat을 따로 실행하지 않아도 앱만 켜면 도구가 붙는다.
+# COM 서버들이 요구하는 '사용자 로그인 세션' 제약도 자연히 지켜진다 — 앱이 그 세션에서
+# 돌고 있고 자식 프로세스가 세션을 그대로 물려받기 때문이다.
+#   (등록 이름, 스크립트 파일, 기본 활성 여부)
+# 등록 이름이 도구 접두사가 된다(office__read_excel_range, docs__search_docs …).
+# CATIA/ANSYS는 해당 제품이 깔린 PC에서만 의미가 있고, 켜 두면 도구 목록만 길어져
+# 약한 로컬 모델의 도구 선택 정확도가 떨어진다 — 등록만 해 두고 기본은 꺼 둔다.
+MCP_BUNDLED_SERVERS = (
+    ("office", "office_server.py", True),
+    ("outlook", "outlook_server.py", True),
+    ("docs", "rag_server.py", True),
+    ("pdf", "pdf_server.py", True),
+    ("catia", "catia_server.py", False),
+    ("ansys", "ansys_server.py", False),
+)
+
+
+def mcp_server_dir() -> Path | None:
+    """같은 저장소의 mcp_server/ 폴더. 못 찾으면 None(자동 등록을 건너뛴다).
+
+    소스 실행이면 저장소 루트 아래(../mcp_server), exe 설치본이면 앱 폴더 옆에
+    같이 넣어 둔 경우를 본다. 둘 다 없으면 서버를 번들하지 않은 배포로 보고
+    빈 설정을 쓴다(기존 동작 그대로).
+    """
+    for cand in (app_dir().parent / "mcp_server", app_dir() / "mcp_server"):
+        if (cand / "office_server.py").is_file():
+            return cand
+    return None
+
+
+def python_for_mcp() -> str:
+    """MCP 서버를 띄울 파이썬 실행 파일 경로.
+
+    루트 공용 venv > 지금 이 앱을 돌리는 파이썬 > PATH 순. bat들이 `..\\venv\\Scripts\\
+    python.exe`를 먼저 보는 것과 같은 규약이다 — fastmcp/pywin32가 설치되는 곳이
+    루트 requirements.txt를 받은 그 venv이기 때문이다.
+    exe로 묶인 경우 sys.executable은 앱 자신이라 쓸 수 없다(자기 자신을 다시 띄운다).
+    """
+    root = app_dir().parent
+    for cand in (root / "venv" / "Scripts" / "python.exe", root / "venv" / "bin" / "python"):
+        if cand.is_file():
+            return str(cand)
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    return shutil.which("python") or shutil.which("python3") or "python"
+
+
+def default_mcp_config() -> dict:
+    """번들 MCP 서버들을 stdio로 등록한 기본 설정을 만든다. 폴더가 없으면 빈 설정.
+
+    - 스크립트는 **절대경로**로 적는다: 자식 프로세스의 작업 폴더는 앱 쪽이라
+      상대경로면 못 찾는다. (파이썬이 스크립트가 있는 폴더를 sys.path에 넣어 주므로
+      rag_core→office_server 같은 같은 폴더 import는 그대로 동작한다.)
+    - `--transport stdio`를 명시한다: 기존에 bat으로 http를 쓰던 PC에 남아 있는
+      OFFICE_MCP_TRANSPORT=http 같은 환경변수가 기본값을 뒤집어, 서버가 HTTP로 떠서
+      stdio 응답을 영영 못 주는 사고를 막는다.
+    """
+    folder = mcp_server_dir()
+    if folder is None:
+        return {"mcpServers": {}}
+    python = python_for_mcp()
+    servers: dict = {}
+    for name, script, enabled in MCP_BUNDLED_SERVERS:
+        path = folder / script
+        if not path.is_file():
+            continue  # 저장소에서 뺀 서버는 등록하지 않는다
+        spec: dict = {"command": python, "args": [str(path), "--transport", "stdio"]}
+        if not enabled:
+            spec["disabled"] = True
+        servers[name] = spec
+    return {"mcpServers": servers}
+
 
 def app_dir() -> Path:
     """실행 파일(또는 소스 루트)이 있는 폴더. 동봉된 llama-server를 찾는 기준."""
@@ -153,10 +227,26 @@ def save_config(data_dir: Path, config: dict) -> None:
 
 
 def mcp_config_path(data_dir: Path) -> Path:
+    """mcp_servers.json 경로. 처음 실행이거나 비어 있으면 번들 서버를 자동 등록한다.
+
+    **이미 사용자가 등록해 둔 서버가 하나라도 있으면 절대 건드리지 않는다** — 자동
+    생성은 '처음 실행'과 '서버가 하나도 없는 설정'에만 개입한다. 손으로 고치다 JSON이
+    깨진 파일도 덮어쓰지 않는다(사용자가 쓴 내용을 날리지 않는 쪽으로 물러선다 —
+    MCPManager가 읽기 실패를 경고로 알린다).
+    HTTP 주소로 등록해 쓰던 기존 설정을 stdio로 바꾸는 건 자동으로 하지 않는다.
+    설정 → MCP의 [번들 서버 자동 설정] 버튼으로 사용자가 확인하고 바꾼다.
+    """
     path = data_dir / "mcp_servers.json"
-    if not path.exists():
-        path.write_text(
-            json.dumps(DEFAULT_MCP_CONFIG, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return path
+        if existing.get("mcpServers"):
+            return path
+    config = default_mcp_config()
+    path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    count = len(config["mcpServers"])
+    if count:
+        print(f"[정보] MCP 서버 {count}개를 자동 등록했습니다 ({mcp_server_dir()}).")
     return path

@@ -23,6 +23,10 @@ import json
 from pathlib import Path
 
 CALL_TIMEOUT_SEC = 120
+# 서버 하나가 '연결됨 또는 실패'로 확정되기를 기다리는 한도. 앱이 서버를 직접 띄우는
+# stdio 구성에서는 파이썬 기동 + import(pywin32/qdrant 등)까지 걸리므로 넉넉히 잡되,
+# 무한정 기다리지는 않는다 — 서버 하나가 멈추면 앱 자체가 못 뜨기 때문이다.
+START_TIMEOUT_SEC = 30
 SEPARATOR = "__"  # 도구 이름 규칙: <서버이름>__<도구이름>
 
 
@@ -40,8 +44,22 @@ class _ServerWorker:
         self._ready = asyncio.Event()
 
     async def start(self) -> None:
+        """워커를 띄우고 연결(또는 실패)이 확정될 때까지 기다린다. 예외를 밖으로 내지 않는다.
+
+        기다림에 상한을 둔다 — 앱이 서버를 자식 프로세스로 직접 띄우게 되면서, 서버
+        하나가 import 단계에서 멈추거나 command 경로가 틀렸을 때 lifespan이 영영
+        안 끝나 UI 자체가 안 뜨는 경로가 생겼다. 시간이 지나면 그 서버만 포기한다.
+        """
         self.task = asyncio.create_task(self._run(), name=f"mcp-{self.name}")
-        await self._ready.wait()
+        try:
+            await asyncio.wait_for(self._ready.wait(), timeout=START_TIMEOUT_SEC)
+        except asyncio.TimeoutError:
+            self.error = (
+                f"{START_TIMEOUT_SEC}초 안에 시작되지 않아 건너뜁니다 "
+                "(command 경로와 서버가 단독 실행되는지 확인하세요)"
+            )
+            self.connected = False
+            await self.stop()
 
     async def _run(self) -> None:
         try:
@@ -144,9 +162,13 @@ class MCPManager:
         for name, spec in servers.items():
             if spec.get("disabled"):
                 continue
-            worker = _ServerWorker(name, spec)
-            self.workers[name] = worker
-            await worker.start()
+            self.workers[name] = _ServerWorker(name, spec)
+        if not self.workers:
+            return
+        # 서버들을 **동시에** 띄운다. 순차로 기다리면 (앱이 직접 띄우는 stdio 구성에서)
+        # 서버 수만큼 앱 기동이 늦어져 브라우저가 빈 화면을 먼저 만난다.
+        await asyncio.gather(*(w.start() for w in self.workers.values()))
+        for name, worker in self.workers.items():
             if worker.connected:
                 print(f"[정보] MCP '{name}' 연결됨 (도구 {len(worker.tools)}개)")
             else:

@@ -1029,6 +1029,34 @@ $("addMcpBtn").addEventListener("click", () => {
   renderMcpRows();
 });
 
+/* 번들 MCP 서버 자동 설정 — 같은 저장소의 mcp_server/*.py 를 stdio로 등록한 설정을
+   서버에서 받아 편집기에 채운다. 저장은 하지 않는다(사용자가 [MCP 저장 + 재연결]로
+   직접) — HTTP 주소로 쓰던 기존 등록을 말없이 덮어쓰지 않기 위해 확인도 한 번 받는다. */
+$("autoMcpBtn").addEventListener("click", async () => {
+  let data = {};
+  try {
+    const res = await fetch("/api/mcp/default-config");
+    data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.status);
+  } catch (e) {
+    $("settingsMsg").textContent = `자동 설정을 가져오지 못했습니다: ${e.message}`;
+    return;
+  }
+  if (!data.count) {
+    $("settingsMsg").textContent =
+      "번들 MCP 서버를 찾지 못했습니다 — mcp_server/ 폴더가 앱과 같은 저장소에 있어야 합니다.";
+    return;
+  }
+  if (editingMcpServers.length &&
+      !confirm(`지금 등록된 서버 ${editingMcpServers.length}개를 자동 설정 ${data.count}개로 바꿉니다.\n` +
+               `(${data.folder})\n계속할까요?`)) return;
+  editingMcpServers = parseMcpConfig(data.content);
+  renderMcpRows();
+  $("mcpConfig").value = data.content;
+  $("settingsMsg").textContent =
+    `자동 설정 ${data.count}개를 채웠습니다 — [MCP 저장 + 재연결]을 눌러 적용하세요.`;
+});
+
 /* 외부 LLM 프로바이더 편집기 */
 function renderProviderRows() {
   const box = $("providerRows");

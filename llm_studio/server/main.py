@@ -12,9 +12,14 @@ FastAPI 앱: 웹 UI 정적 파일 + REST/SSE API.
     POST /api/conversations/{id}/rename  제목 변경
     POST /api/upload                 파일 첨부 (텍스트 추출)
     GET  /api/settings, PUT /api/settings
+    GET  /api/memory, DELETE /api/memory/{id}   장기 기억 조회·삭제
+    POST /api/fs/dialog              네이티브 파일 선택 (원본 제자리 읽기, 로컬 전용)
     GET  /api/mcp                    MCP 상태/도구 목록
     GET  /api/mcp/config, PUT /api/mcp/config (저장 후 재연결)
-    POST /api/server/restart         llama-server 재시작 (설정 반영)
+    GET  /api/mcp/default-config     번들 MCP 서버 자동 설정 생성 (저장은 안 함)
+    GET  /api/models                 models/ 폴더의 .gguf 목록
+    POST /api/server/start, /stop, /restart      llama-server 서빙 제어
+    POST /api/shutdown               앱(웹 UI + 자체 llama-server) 종료
 """
 
 from __future__ import annotations
@@ -31,7 +36,13 @@ from pydantic import BaseModel
 
 from . import agent, planner
 from .approvals import ApprovalBroker
-from .config import RESTART_KEYS, save_config, static_dir
+from .config import (
+    RESTART_KEYS,
+    default_mcp_config,
+    mcp_server_dir,
+    save_config,
+    static_dir,
+)
 
 ATTACH_MAX_CHARS = 30_000  # 첨부 파일당 프롬프트에 넣는 텍스트 한도
 
@@ -355,6 +366,21 @@ def create_app(state) -> FastAPI:
     @app.get("/api/mcp/config")
     async def get_mcp_config():
         return {"content": state.mcp.config_path.read_text(encoding="utf-8")}
+
+    @app.get("/api/mcp/default-config")
+    async def get_default_mcp_config():
+        """같은 저장소의 mcp_server/ 서버들을 stdio로 등록한 '자동 설정'을 만들어 준다.
+
+        저장하지 않고 돌려주기만 한다 — UI가 편집기에 채우고 사용자가 확인한 뒤
+        [MCP 저장 + 재연결]로 적용한다. HTTP 주소(run_*.bat)로 쓰던 기존 설정을
+        말없이 갈아엎지 않기 위한 구분이다.
+        """
+        config = default_mcp_config()
+        return {
+            "content": json.dumps(config, ensure_ascii=False, indent=2),
+            "count": len(config.get("mcpServers", {})),
+            "folder": str(mcp_server_dir() or ""),
+        }
 
     @app.put("/api/mcp/config")
     async def put_mcp_config(req: MCPConfigRequest):
