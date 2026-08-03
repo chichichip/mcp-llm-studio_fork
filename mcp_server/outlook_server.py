@@ -388,7 +388,13 @@ def _mail_summary(item) -> str:
 
 
 def _restricted(folder, since=None, until=None, unread_only=False, newest_first=True):
-    """폴더 항목을 시간/읽음으로 서버측 Restrict 후 정렬해 돌려준다."""
+    """폴더 항목을 시간/읽음으로 서버측 Restrict 후 정렬해 돌려준다.
+
+    반환: (항목 컬렉션, 필터 적용 여부). Restrict는 스토어/폴더 종류에 따라 실패할 수
+    있는데(공유 사서함, 일부 IMAP 등), 그때 두 번째 값이 False가 된다. 호출부는 반드시
+    _passes로 같은 조건을 파이썬 쪽에서 다시 걸어야 한다 — 안 그러면 since/until/
+    unread_only가 **조용히 무시된** 결과가 사용자에게 나간다.
+    """
     items = folder.Items
     clauses = []
     if since:
@@ -401,12 +407,41 @@ def _restricted(folder, since=None, until=None, unread_only=False, newest_first=
         items.Sort("[ReceivedTime]", newest_first)
     except Exception:
         pass
-    if clauses:
+    if not clauses:
+        return items, True  # 걸 조건이 없으면 '적용됨'과 같다
+    try:
+        return items.Restrict(" AND ".join(clauses)), True
+    except pythoncom.com_error:
+        return items, False  # 호출부가 _passes로 직접 거른다
+
+
+def _received(item):
+    """항목의 수신 시각을 naive datetime으로. 못 읽으면 None."""
+    rt = getattr(item, "ReceivedTime", None)
+    if rt is None:
+        return None
+    try:
+        return datetime(rt.year, rt.month, rt.day, rt.hour, rt.minute, rt.second)
+    except Exception:
+        return None
+
+
+def _passes(item, since=None, until=None, unread_only=False) -> bool:
+    """Restrict가 안 먹었을 때 파이썬 쪽에서 같은 조건을 확인한다."""
+    if unread_only:
         try:
-            items = items.Restrict(" AND ".join(clauses))
-        except pythoncom.com_error:
-            pass  # Restrict 실패 시 파이썬 측 필터로 폴백
-    return items
+            if not item.UnRead:
+                return False
+        except Exception:
+            pass  # 읽음 여부를 못 보면 거르지 않는다(빠뜨리는 것보다 낫다)
+    if since or until:
+        rt = _received(item)
+        if rt is not None:
+            if since and rt < since:
+                return False
+            if until and rt > until:
+                return False
+    return True
 
 
 # ═══════════════════════════════ A. 연결·개요 ═══════════════════════════════
@@ -554,7 +589,7 @@ def list_messages(
     fld = _resolve_folder(folder)
     since_dt = _parse_dt(since)
     until_dt = _parse_dt(until, end_of_day=True)
-    items = _restricted(fld, since_dt, until_dt, unread_only)
+    items, applied = _restricted(fld, since_dt, until_dt, unread_only)
 
     limit = max(1, min(limit, MAX_ITEMS))
     fs = from_sender.lower()
@@ -567,6 +602,9 @@ def list_messages(
         if scanned > 5000:  # 안전장치: 지나치게 큰 폴더 순회 방지
             break
         if not _is_mail(item):
+            continue
+        # Restrict가 안 먹은 폴더면 시간/읽음 조건을 여기서 직접 건다
+        if not applied and not _passes(item, since_dt, until_dt, unread_only):
             continue
         if fs:
             who = f"{getattr(item, 'SenderName', '')} {_sender_email(item)}".lower()
@@ -623,7 +661,7 @@ def poll_new_mail(
 
     fld = _resolve_folder(folder)
     since_dt = _parse_dt(since)
-    items = _restricted(fld, since_dt, None, unread_only, newest_first=False)
+    items, applied = _restricted(fld, since_dt, None, unread_only, newest_first=False)
 
     limit = max(1, min(limit, MAX_ITEMS))
     hits = []
@@ -631,16 +669,15 @@ def poll_new_mail(
     for item in items:
         if not _is_mail(item):
             continue
-        rt = getattr(item, "ReceivedTime", None)
+        if not applied and not _passes(item, since_dt, None, unread_only):
+            continue
         # Restrict 경계값(>=)이 같은 메일을 다시 잡지 않도록 since와 동일 시각은 건너뛴다.
-        try:
-            rt_naive = datetime(rt.year, rt.month, rt.day, rt.hour, rt.minute, rt.second)
+        rt_naive = _received(item)
+        if rt_naive is not None:
             if since_dt and rt_naive <= since_dt:
                 continue
             if latest is None or rt_naive > latest:
                 latest = rt_naive
-        except Exception:
-            pass
         hits.append(item)
         if len(hits) >= limit:
             break
@@ -687,7 +724,7 @@ def search_messages(
         except OutlookError as e:
             out.append(f"[{spec}] {e}")
             continue
-        items = _restricted(fld, since_dt, None, False)
+        items, applied = _restricted(fld, since_dt, None, False)
         found = []
         scanned = 0
         for item in items:
@@ -695,6 +732,8 @@ def search_messages(
             if scanned > 5000 or total >= limit:
                 break
             if not _is_mail(item):
+                continue
+            if not applied and not _passes(item, since_dt):
                 continue
             hay = " ".join([
                 str(getattr(item, "Subject", "")),
@@ -1800,16 +1839,16 @@ def delete_message(
     for eid in ids:
         try:
             item = _ns().GetItemFromID(eid)
-            item.Delete()  # 먼저 지운편지함으로
             if permanent and deleted_fld is not None:
-                # 지운편지함에서 같은 항목을 찾아 한 번 더 삭제(영구)
-                try:
-                    for it in list(deleted_fld.Items):
-                        if getattr(it, "Subject", None) == getattr(item, "Subject", None):
-                            it.Delete()
-                            break
-                except Exception:
-                    pass
+                # 지운편지함으로 **옮긴 뒤 돌려받은 바로 그 항목**만 한 번 더 지운다.
+                # 삭제 후 제목으로 다시 찾는 방식은 지운편지함에 같은 제목의 다른 메일이
+                # 있으면(RE: 회의 같은 건 흔하다) 엉뚱한 메일을 영구 삭제한다.
+                # Move가 항목을 못 돌려주면 이동만 된 상태로 둔다 — 잘못 지우느니 낫다.
+                moved = item.Move(deleted_fld)
+                if moved is not None:
+                    moved.Delete()
+            else:
+                item.Delete()  # 지운편지함으로 이동
             done += 1
         except Exception:
             continue

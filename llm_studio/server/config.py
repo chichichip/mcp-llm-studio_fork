@@ -85,6 +85,44 @@ DEFAULT_CONFIG = {
 RESTART_KEYS = {"ctx", "kv_quant", "model_path", "model_alias", "llama_port",
                 "llama_external_url", "gpu_layers"}
 
+# --host 0.0.0.0으로 열었을 때 **원격 접속자**가 바꿀 수 있는 설정 키.
+# 나머지(승인 게이트 on/off, 프로바이더·API 키, 서버 파라미터 등)는 이 PC에서만 바꾼다 —
+# 원격에서 approval_enabled를 꺼 버리면 위험 도구 승인 게이트가 통째로 무력화된다.
+# active_provider는 '지금 어느 모델로 답할지'라 원격 사용자에게도 필요해서 열어 둔다.
+REMOTE_SETTABLE_KEYS = {"active_provider"}
+
+# GET /api/settings가 API 키 대신 내려보내는 표식. 저장된 키가 있으면 이 값을 주고,
+# PUT에서 이 값이 그대로 돌아오면 '바꾸지 않음'으로 보고 저장된 키를 유지한다.
+# 키 입력란은 password 타입이라 사용자 눈에는 어차피 점으로 보인다 — UI는 그대로 두고
+# 키 평문만 브라우저에 안 나가게 하는 장치다. (지우려면 입력란을 비우면 된다.)
+API_KEY_PLACEHOLDER = "__saved__"
+
+
+def redact_config(config: dict) -> dict:
+    """설정 사본에서 API 키 평문을 표식으로 바꾼다 (브라우저로 내려보낼 용도)."""
+    safe = dict(config)
+    safe["providers"] = [
+        {**p, "api_key": (API_KEY_PLACEHOLDER if p.get("api_key") else "")}
+        for p in config.get("providers", [])
+    ]
+    return safe
+
+
+def restore_api_keys(new_providers: list, old_providers: list) -> list:
+    """표식이 그대로 돌아온 프로바이더는 저장돼 있던 키를 되살린다.
+
+    이름으로 이전 항목을 찾는다 — 이름을 바꾸면서 키를 안 건드리면 짝을 못 찾아 키가
+    비게 되므로, 그때는 키를 다시 입력해야 한다.
+    """
+    saved = {p.get("name"): p.get("api_key", "") for p in old_providers}
+    out = []
+    for p in new_providers:
+        p = dict(p)
+        if p.get("api_key") == API_KEY_PLACEHOLDER:
+            p["api_key"] = saved.get(p.get("name"), "")
+        out.append(p)
+    return out
+
 DEFAULT_MCP_CONFIG = {"mcpServers": {}}
 
 # 같은 저장소의 mcp_server/ 서버들을 앱이 **자식 프로세스(stdio)로 직접 띄우기** 위한 목록.

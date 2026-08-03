@@ -15,11 +15,15 @@ rem offline-safe via ensurepip). Set USE_VENV=0 below to use the system python.
 cd /d "%~dp0"
 
 rem ===== EDIT: internal PyPI mirror (leave blank for offline wheelhouse-only) =====
-set "MIRROR_INDEX=http://10.42.86.106:8081/repository/py-pi-local/simple"
-set "MIRROR_HOST=10.42.86.106:8081"
+rem Keep these BLANK in the repository - this file is public, and an internal
+rem host/IP does not belong in it. Fill them in on the company PC only.
+set "MIRROR_INDEX="
+set "MIRROR_HOST="
 rem Example:
 rem   set "MIRROR_INDEX=http://pypi.company.local/simple"
 rem   set "MIRROR_HOST=pypi.company.local"
+rem   set "MIRROR_INDEX=http://10.x.x.x:8081/repository/py-pi-local/simple"
+rem   set "MIRROR_HOST=10.x.x.x:8081"
 
 rem ===== EDIT: also write a per-user pip.ini so the mirror attaches to EVERY pip =====
 rem   1 = create %USERPROFILE%\pip\pip.ini (only when it does not exist yet)

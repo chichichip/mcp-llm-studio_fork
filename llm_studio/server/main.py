@@ -37,9 +37,12 @@ from pydantic import BaseModel
 from . import agent, planner
 from .approvals import ApprovalBroker
 from .config import (
+    REMOTE_SETTABLE_KEYS,
     RESTART_KEYS,
     default_mcp_config,
     mcp_server_dir,
+    redact_config,
+    restore_api_keys,
     save_config,
     static_dir,
 )
@@ -274,11 +277,13 @@ def create_app(state) -> FastAPI:
     # 폴리시된 관리 UI는 fast-follow. 여기서는 최소 API만 노출한다.
 
     @app.get("/api/memory")
-    async def list_memory():
+    async def list_memory(request: Request):
+        _require_local(request)  # 사용자·프로젝트에 관한 사실 모음 — 원격에 열지 않는다
         return {"count": state.memory.count(), "items": state.memory.all()}
 
     @app.delete("/api/memory/{mem_id}")
-    async def delete_memory(mem_id: int):
+    async def delete_memory(mem_id: int, request: Request):
+        _require_local(request)
         if not state.memory.delete(mem_id):
             raise HTTPException(404, "해당 기억을 찾을 수 없습니다.")
         return {"ok": True}
@@ -328,10 +333,21 @@ def create_app(state) -> FastAPI:
 
     @app.get("/api/settings")
     async def get_settings():
-        return state.config
+        # API 키 평문은 브라우저로 내보내지 않는다(README가 약속한 동작) — 저장 여부만
+        # 표식으로 알린다. PUT에서 표식이 그대로 오면 저장된 키를 그대로 둔다.
+        return redact_config(state.config)
 
     @app.put("/api/settings")
-    async def put_settings(new: dict):
+    async def put_settings(new: dict, request: Request):
+        # 원격 접속자는 REMOTE_SETTABLE_KEYS 안에서만 바꿀 수 있다. 이 가드가 없으면
+        # 같은 망의 아무 PC나 approval_enabled를 꺼서 위험 도구 승인 게이트를 통째로
+        # 무력화할 수 있다(/api/chat/approve를 로컬 전용으로 막아 둔 이유가 무의미해진다).
+        if not _is_local(request) and not set(new) <= REMOTE_SETTABLE_KEYS:
+            raise HTTPException(
+                403,
+                f"원격 접속에서는 {sorted(REMOTE_SETTABLE_KEYS)}만 바꿀 수 있습니다. "
+                "나머지 설정은 앱이 돌고 있는 PC에서 변경하세요.",
+            )
         unknown = set(new) - set(state.config)
         if unknown:
             raise HTTPException(400, f"알 수 없는 설정 키: {sorted(unknown)}")
@@ -344,6 +360,10 @@ def create_app(state) -> FastAPI:
             names = [p["name"].strip() for p in new["providers"]]
             if "local" in names or len(names) != len(set(names)):
                 raise HTTPException(400, "프로바이더 이름은 중복될 수 없고 'local'은 예약어입니다.")
+            # 표식이 그대로 온 항목은 저장돼 있던 키를 되살린다 (GET이 평문을 안 주므로,
+            # 이걸 안 하면 설정을 저장할 때마다 등록해 둔 키가 지워진다).
+            new["providers"] = restore_api_keys(
+                new["providers"], state.config.get("providers", []))
         if "active_provider" in new:
             providers = new.get("providers", state.config.get("providers", []))
             valid = {"local"} | {p.get("name") for p in providers}
@@ -368,7 +388,8 @@ def create_app(state) -> FastAPI:
         return {"content": state.mcp.config_path.read_text(encoding="utf-8")}
 
     @app.get("/api/mcp/default-config")
-    async def get_default_mcp_config():
+    async def get_default_mcp_config(request: Request):
+        _require_local(request)  # 이 PC의 경로·파이썬 위치가 담긴다
         """같은 저장소의 mcp_server/ 서버들을 stdio로 등록한 '자동 설정'을 만들어 준다.
 
         저장하지 않고 돌려주기만 한다 — UI가 편집기에 채우고 사용자가 확인한 뒤
@@ -383,7 +404,10 @@ def create_app(state) -> FastAPI:
         }
 
     @app.put("/api/mcp/config")
-    async def put_mcp_config(req: MCPConfigRequest):
+    async def put_mcp_config(req: MCPConfigRequest, request: Request):
+        # ⚠ 이 설정의 command/args는 그대로 프로세스로 실행된다(stdio MCP). 원격에서
+        # 쓸 수 있으면 곧 이 PC에서의 임의 명령 실행이므로 반드시 로컬 전용이다.
+        _require_local(request)
         try:
             json.loads(req.content)  # 저장 전 JSON 문법 검증
         except json.JSONDecodeError as e:
@@ -403,7 +427,8 @@ def create_app(state) -> FastAPI:
         return {"models": state.llama.list_models(), "current": state.config.get("model_path", "")}
 
     @app.post("/api/server/start")
-    async def start_server():
+    async def start_server(request: Request):
+        _require_local(request)  # 이 PC의 프로세스를 띄우는 동작
         if state.mock:
             raise HTTPException(400, "목(--mock) 모드에서는 서버를 시작할 수 없습니다.")
         if state.llama.running:
@@ -416,14 +441,16 @@ def create_app(state) -> FastAPI:
         return {"ok": True, "llama": state.llama.status()}
 
     @app.post("/api/server/stop")
-    async def stop_server():
+    async def stop_server(request: Request):
+        _require_local(request)
         # 외부 서버는 우리 것이 아니므로 stop()이 연결만 끊는다(프로세스 유지).
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, state.llama.stop)
         return {"ok": True, "llama": state.llama.status()}
 
     @app.post("/api/server/restart")
-    async def restart_server():
+    async def restart_server(request: Request):
+        _require_local(request)
         if state.mock:
             raise HTTPException(400, "목 모드에서는 재시작할 수 없습니다.")
         loop = asyncio.get_running_loop()
@@ -436,15 +463,16 @@ def create_app(state) -> FastAPI:
     # ---------- 호스팅(앱 서버) 종료 ----------
 
     @app.post("/api/shutdown")
-    async def shutdown():
-        """이 앱(웹 UI + 자체 llama-server)을 통째로 내린다.
+    async def shutdown(request: Request):
+        """이 앱(웹 UI + 자체 llama-server)을 통째로 내린다. (로컬 전용)
 
         uvicorn Server.should_exit를 세우면 우아한 종료가 돌면서 lifespan의
         shutdown이 실행돼 mcp.stop()·llama.stop()이 호출된다. external 모드라면
         따로 띄운 LLM 서버는 건드리지 않고 연결만 끊는다(그 서버는 계속 떠 있다).
         응답을 먼저 돌려보내야 페이지가 '종료됨'을 표시할 수 있으므로, 종료 신호는
-        약간 늦춰 건다.
+        약간 늦춰 건다. 원격 접속자가 남의 앱을 내리지 못하도록 로컬에서만 허용한다.
         """
+        _require_local(request)
         server = getattr(state, "server", None)
 
         async def _trigger():
@@ -538,12 +566,28 @@ async def _maybe_autosummarize(state, conv: dict, provider: dict) -> None:
         state.store.save(conv)
 
 
-def _require_local(request: Request) -> None:
-    """민감 API(파일 탐색, 위험 도구 승인)는 로컬 접속에서만 허용한다
-    (0.0.0.0 공개 시 원격의 디스크 노출·승인 게이트 우회를 막는다)."""
+def _is_local(request: Request) -> bool:
+    """이 요청이 앱이 돌고 있는 그 PC에서 온 것인지.
+
+    소켓의 상대 주소만 본다 — X-Forwarded-For 같은 헤더는 **일부러** 믿지 않는다
+    (헤더는 클라이언트가 마음대로 붙일 수 있어 그걸 믿으면 가드가 의미 없다).
+    앞에 리버스 프록시를 두면 모든 요청이 로컬로 보이므로, 그런 구성으로 쓸 거면
+    프록시 쪽에서 따로 인증을 걸어야 한다.
+    """
     host = request.client.host if request.client else ""
-    if host not in ("127.0.0.1", "::1", "localhost"):
-        raise HTTPException(403, "이 기능은 이 PC(127.0.0.1)에서만 사용할 수 있습니다.")
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
+def _require_local(request: Request) -> None:
+    """관리 API는 로컬 접속에서만 허용한다.
+
+    --host 0.0.0.0으로 열면 같은 망의 누구나 UI에 닿는데, 인증이 없다. 채팅·대화기록
+    처럼 '쓰라고 연 기능'은 열어 두고, **이 PC를 건드리는 기능**은 여기서 막는다:
+    MCP 설정 쓰기(임의 명령 실행으로 이어진다), 서버 시작/중지, 앱 종료, 파일 탐색,
+    위험 도구 승인, 장기 기억 열람·삭제.
+    """
+    if not _is_local(request):
+        raise HTTPException(403, "이 기능은 앱이 돌고 있는 PC에서만 사용할 수 있습니다.")
 
 
 def _native_open_dialog() -> str:

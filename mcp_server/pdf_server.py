@@ -19,9 +19,10 @@ DRM(사내 보안프로그램)으로 암호화된 PDF의 **텍스트를 읽어�
     2. word_com     — Word를 백그라운드로 띄워 PDF를 열고(Word가 자동 변환)
                       본문 텍스트를 뽑는다. Word가 DRM 인증 앱이면 복호화된 내용이
                       읽힌다. 레이아웃/표는 뭉개지지만 텍스트 추출엔 충분.
-    3. reader_print — (실험적) 인증 확정된 Acrobat Reader로 'Microsoft Print to PDF'
-                      인쇄를 걸어 평문 PDF를 만들고 pypdf로 추출. 조용한 파일 출력이
-                      환경마다 달라 신뢰도가 낮다 — 아래 ⚠ 참고.
+    3. reader_print — (실험적, **기본 꺼짐**) Acrobat Reader로 'Microsoft Print to PDF'
+                      인쇄를 걸어 평문 PDF를 만들고 pypdf로 추출. AcroRd32는 출력 경로를
+                      지정할 수 없어 대부분의 환경에서 60초만 태우고 실패한다 — 그래서
+                      기본으로 끄고, PDF_ENABLE_READER_PRINT=1일 때만 시도한다. 아래 ⚠ 참고.
 
     어느 백엔드도 성공하지 못하면 예외가 아니라 **안내 문자열**을 돌려준다.
 
@@ -116,6 +117,10 @@ MAX_CHARS = 20000
 # 지나면 우리가 띄운 Word 프로세스를 강제 종료하고 물러선다 — MCP 서버가 영영 얼지
 # 않도록 하는 안전장치다. 큰 PDF 변환은 오래 걸릴 수 있어 넉넉히 잡는다.
 WORD_TIMEOUT = float(os.getenv("PDF_WORD_TIMEOUT", "90"))
+
+# reader_print 백엔드(실험적)를 쓸지. 기본은 끔 — 무인 인쇄 출력이 프린터 포트 설정에
+# 의존해 대부분 실패하는데, 실패를 확인하는 데만 60초를 태운다. 1로 켤 수 있다.
+READER_PRINT_ENABLED = os.getenv("PDF_ENABLE_READER_PRINT", "").strip() in ("1", "true", "yes")
 
 
 class PdfError(Exception):
@@ -319,13 +324,46 @@ def _kill_pids(pids: set[int]) -> None:
             pass
 
 
+# 대화상자 기본 버튼으로 인정할 캡션(앰퍼샌드 제거 후 비교). Office 표시 언어를 따른다.
+_OK_BUTTON_CAPTIONS = {"확인", "예", "ok", "yes"}
+
+
+def _click_dialog_button(hwnd, win32con, win32gui) -> None:
+    """대화상자 안의 확인/예 버튼을 찾아 누른다 (그 창에만 가는 메시지로).
+
+    자식 버튼을 직접 찾아 BM_CLICK을 보낸다. PostMessage라 상대가 멈춰 있어도 이쪽이
+    같이 멈추지 않는다(SendMessage는 처리될 때까지 블로킹돼 워치독이 굳는다).
+    """
+    def _child(child, _):
+        try:
+            if win32gui.GetClassName(child) == "Button":
+                caption = (win32gui.GetWindowText(child) or "").replace("&", "").strip()
+                if caption.lower() in _OK_BUTTON_CAPTIONS:
+                    win32gui.PostMessage(child, win32con.BM_CLICK, 0, 0)
+                    return False  # 하나 눌렀으면 그만
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
+    try:
+        win32gui.EnumChildWindows(hwnd, _child, None)
+    except Exception:  # noqa: BLE001 — 열거 중 창이 닫히면 예외가 난다(정상)
+        pass
+
+
 def _dismiss_word_dialogs(pids: set[int]) -> None:
     """지정 Word PID가 띄운 모달 대화상자(예: 'PDF를 편집 가능한 문서로 변환')를
-    자동으로 확인(기본 버튼/Enter)해 Open이 진행되도록 한다. best-effort — 실패해도 무해."""
+    자동으로 확인해 Open이 진행되도록 한다. best-effort — 실패해도 무해.
+
+    ⚠ **전역 키 입력(keybd_event)은 절대 쓰지 않는다.** 이 함수는 사용자가 로그인해
+    쓰고 있는 데스크톱에서 0.3초마다 최대 WORD_TIMEOUT 동안 반복 호출된다. 합성 Enter는
+    포커스를 가진 창으로 가는데, SetForegroundWindow는 최신 Windows에서 자주 실패하므로
+    (foreground lock) 사용자가 쓰던 창에 Enter가 수백 번 들어가 메일이 발송되거나 다른
+    대화상자가 확인되는 사고가 난다. hwnd를 지정한 메시지만 쓰고, 포커스도 뺏지 않는다.
+    """
     if not pids:
         return
     try:
-        import win32api
         import win32con
         import win32gui
         import win32process
@@ -336,14 +374,9 @@ def _dismiss_word_dialogs(pids: set[int]) -> None:
         try:
             _, wpid = win32process.GetWindowThreadProcessId(hwnd)
             if wpid in pids and win32gui.GetClassName(hwnd) in ("#32770", "NUIDialog"):
-                try:
-                    win32gui.SetForegroundWindow(hwnd)
-                except Exception:  # noqa: BLE001
-                    pass
-                # 기본 버튼(OK/확인) 실행: WM_COMMAND IDOK 와 Enter 키 둘 다 시도
+                # 기본 버튼 실행 — 창을 지정한 메시지 두 가지를 시도한다.
                 win32gui.PostMessage(hwnd, win32con.WM_COMMAND, win32con.IDOK, 0)
-                win32api.keybd_event(0x0D, 0, 0, 0)
-                win32api.keybd_event(0x0D, 0, win32con.KEYEVENTF_KEYUP, 0)
+                _click_dialog_button(hwnd, win32con, win32gui)
         except Exception:  # noqa: BLE001
             pass
         return True
@@ -453,11 +486,21 @@ def _find_acrobat() -> str | None:
 
 
 def _extract_reader_print(path: str, pages: str, reasons: list[str]) -> str | None:
-    """(실험적) Acrobat Reader로 'Microsoft Print to PDF' 인쇄 → 평문 PDF → pypdf.
+    """(실험적·기본 비활성) Acrobat Reader로 'Microsoft Print to PDF' 인쇄 → pypdf.
 
-    ⚠ 'Microsoft Print to PDF'는 보통 저장 대화상자를 띄워 무인 출력이 안 될 수 있다.
-    그 경우 타임아웃으로 물러선다(멈추지 않음). 신뢰할 수 있는 대안은 docstring 참고.
+    ⚠ 기본으로 끈다(PDF_ENABLE_READER_PRINT=1로 켠다). AcroRd32 `/t`는 **출력 파일
+    경로를 지정할 수 없어** 결과물이 프린터 포트 설정 위치로 가는데, 이 함수는 임시
+    폴더의 out.pdf를 기다린다 — 즉 대부분의 환경에서 60초를 태우고 반드시 실패한다.
+    'Microsoft Print to PDF'가 보통 저장 대화상자를 띄우는 것도 같은 이유다.
+    확실한 대안은 Reader에서 수동으로 평문 PDF를 만든 뒤 그 파일을 read_pdf_text에
+    넘기는 것이다(그러면 direct 백엔드로 바로 읽힌다).
     """
+    if not READER_PRINT_ENABLED:
+        reasons.append(
+            "reader_print: 기본 비활성(무인 출력이 환경에 거의 의존 — "
+            "쓰려면 PDF_ENABLE_READER_PRINT=1)"
+        )
+        return None
     if not PYPDF_AVAILABLE:
         reasons.append(f"reader_print: pypdf 없음({PYPDF_IMPORT_ERROR})")
         return None
@@ -607,8 +650,11 @@ def pdf_status(path: str = "") -> str:
     lines = ["PDF 추출 백엔드 상태:"]
     lines.append(f"  - direct(pypdf): {'가용' if PYPDF_AVAILABLE else '비활성 — ' + PYPDF_IMPORT_ERROR}")
     lines.append(f"  - word_com(pywin32): {'가용' if COM_AVAILABLE else '비활성 — ' + COM_IMPORT_ERROR}")
-    exe = _find_acrobat()
-    lines.append(f"  - reader_print(Acrobat): {exe if exe else '실행 파일 못 찾음(실험적 백엔드)'}")
+    if READER_PRINT_ENABLED:
+        exe = _find_acrobat()
+        lines.append(f"  - reader_print(Acrobat): {exe if exe else '실행 파일 못 찾음'} (실험적)")
+    else:
+        lines.append("  - reader_print(Acrobat): 비활성(기본) — 켜려면 PDF_ENABLE_READER_PRINT=1")
 
     if not path:
         lines.append("\npath 인자에 PDF 경로를 주면 각 백엔드로 실제 추출을 진단합니다.")

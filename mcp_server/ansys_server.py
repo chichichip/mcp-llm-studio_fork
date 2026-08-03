@@ -759,8 +759,16 @@ def run_apdl(command: str) -> str:
     cmd = (command or "").strip()
     if not cmd:
         raise AnsysError("command가 비어 있습니다.")
-    upper = cmd.upper().lstrip()
-    for banned, alt in (("/CLE", "clear_model"), ("/EXI", "shutdown_ansys"), ("EXIT", "shutdown_ansys")):
+    # 앞의 '~'(외부 명령 접두)와 공백을 떼고 본다. MAPDL은 명령을 4글자로 줄여 쓸 수
+    # 있어 접두사로 비교한다 — /CLEAR·/CLE, /EXIT·/EXI, /QUIT·/QUI 가 모두 걸린다.
+    upper = cmd.upper().lstrip("~ \t")
+    for banned, alt in (
+        ("/CLE", "clear_model"),      # /CLEAR — 모델 전체 삭제
+        ("/EXI", "shutdown_ansys"),   # /EXIT  — 세션 종료
+        ("/QUI", "shutdown_ansys"),   # /QUIT  — 저장 없이 종료 (예전엔 안 막혔다)
+        ("/EOF", "shutdown_ansys"),   # 입력 종료 — 세션이 끊긴다
+        ("EXIT", "shutdown_ansys"),
+    ):
         if upper.startswith(banned):
             raise AnsysError(f"파괴적 명령은 run_apdl로 실행할 수 없습니다 — {alt}(confirm 게이트)를 쓰세요.")
     mapdl = _session()
