@@ -83,6 +83,14 @@ build_exe.bat               # → dist\LocalLLMStudio\
 # 2) Inno Setup 6 설치 후 installer.iss 컴파일 → Output\LocalLLMStudio-Setup-1.0.0.exe
 ```
 
+**`.spec` 파일을 두지 않는다.** PyInstaller 옵션은 전부 `build_exe.bat`의 명령행 인자로
+적혀 있다. `.spec`은 파이썬 스크립트라 사내 반입 검사에서 막히는 경우가 있어, 경계를
+넘어야 하는 파일을 `.bat`과 `.py`로만 제한하려는 것이다. 빌드하면 PyInstaller가
+`LocalLLMStudio.spec`을 자동으로 만드는데, 그건 로컬 빌드 산출물이고 `.gitignore`에 있다.
+
+옵션을 바꿀 일이 생기면 **생성된 spec을 고치지 말고 bat의 인자를 고칠 것** — 다음
+빌드에서 spec이 덮어써진다.
+
 ## 폐쇄망 반입 체크리스트
 
 | 반입물 | 비고 |

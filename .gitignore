@@ -20,6 +20,10 @@ Examples/slack_threads.db
 Examples/discord_threads.db
 Examples/_test_output/
 
+# PyInstaller가 빌드 중 자동 생성하는 spec (build_exe.bat은 명령행 인자를 쓰므로
+# 저장소에는 spec을 두지 않는다 — .spec은 사내 반입 검사에서 막히는 경우가 있다).
+llm_studio/*.spec
+
 # 반입물 — 저장소에 넣지 않고 별도 매체로 옮긴다 (GitHub는 파일당 100MB 제한)
 *.gguf
 llm_studio/llama/
