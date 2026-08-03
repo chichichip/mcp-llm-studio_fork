@@ -206,7 +206,7 @@ def _scope_suffix(scope) -> str:
 
 async def _run_step(step_idx: int, prompt_messages: list[dict], *, base_url, model,
                     settings, api_key, send_top_k, mcp, memory,
-                    tool_servers=None, approver=None) -> AsyncIterator[dict]:
+                    tool_servers=None, approver=None, observer=None) -> AsyncIterator[dict]:
     """한 스텝을 agent.run_chat으로 실행하며 진행 이벤트를 흘린다.
 
     run_chat의 토큰·도구 이벤트를 전부 step_token으로 감싼다(해당 스텝 블록에만 표시).
@@ -222,7 +222,7 @@ async def _run_step(step_idx: int, prompt_messages: list[dict], *, base_url, mod
     async for ev in agent.run_chat(
         base_url=base_url, model=model, messages=prompt_messages, settings=settings,
         api_key=api_key, send_top_k=send_top_k, mcp=mcp, memory=memory, mock=False,
-        tool_servers=tool_servers, approver=approver,
+        tool_servers=tool_servers, approver=approver, observer=observer,
     ):
         etype = ev.get("type")
         if etype in agent.PASSTHROUGH_EVENTS:
@@ -267,6 +267,7 @@ async def run_task(
     max_steps: int = DEFAULT_MAX_STEPS,
     max_replans: int = DEFAULT_MAX_REPLANS,
     approver=None,
+    observer=None,
 ) -> AsyncIterator[dict]:
     """계획-실행으로 한 턴을 처리한다. messages는 system 포함 전체 이력.
 
@@ -306,7 +307,7 @@ async def run_task(
         async for ev in agent.run_chat(
             base_url=base_url, model=model, messages=messages, settings=settings,
             api_key=api_key, send_top_k=send_top_k, mcp=mcp, memory=memory, mock=False,
-            approver=approver,
+            approver=approver, observer=observer,
         ):
             yield ev
         return
@@ -335,7 +336,7 @@ async def run_task(
                 {"role": "user", "content": step_user}],
             base_url=base_url, model=model, settings=settings, api_key=api_key,
             send_top_k=send_top_k, mcp=mcp, memory=memory, tool_servers=scope,
-            approver=approver,
+            approver=approver, observer=observer,
         ):
             if "__result__" in ev:
                 result_text, ok = ev["__result__"], ev["__ok__"]

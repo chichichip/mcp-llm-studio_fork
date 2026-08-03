@@ -32,6 +32,7 @@ from typing import AsyncIterator
 from openai import AsyncOpenAI, NOT_GIVEN
 
 from .config import DEFAULT_CONFIG
+from .context import age_messages
 
 MAX_TOOL_ROUNDS = 8       # 무한 도구 루프 방지 (settings의 max_tool_rounds가 없을 때 기본값)
 TOOL_RESULT_MAX = 20000   # 도구 결과가 컨텍스트를 다 먹지 않게 자르는 한도 (문자)
@@ -93,6 +94,7 @@ async def run_chat(
     mock: bool = False,
     tool_servers=None,
     approver=None,
+    observer=None,
 ) -> AsyncIterator[dict]:
     """대화 한 턴을 실행한다. messages는 system 포함 전체 이력.
 
@@ -106,6 +108,11 @@ async def run_chat(
     settings['approval_tools']에 오른 이름) 전에 approval_request 이벤트를 흘리고
     사용자의 승인/거절을 기다린다. 거절·시간초과면 실행하지 않고 그 사실을 도구
     결과로 모델에 알린다.
+    observer: observer(도구이름, 인자JSON) 콜백. **실제로 실행된** 호출만 통보한다
+    (거절·시간초과된 건 부르지 않는다 — 하지 않은 일이 기록되면 안 된다).
+    worklog가 '이 대화에서 무엇을 읽고 고쳤는지' 대장을 쌓는 데 쓴다. 여기에 두는
+    이유는 일반 채팅과 작업 모드(planner가 run_chat을 재사용한다)가 이 지점에서
+    만나기 때문이다 — 이벤트 스트림 쪽에 두면 작업 모드에서 놓친다.
     """
     if mock:
         async for event in _mock_stream(messages):
@@ -128,7 +135,10 @@ async def run_chat(
         for round_no in range(max_rounds):
             stream = await client.chat.completions.create(
                 model=model,
-                messages=msgs,
+                # 보내는 건 접은 사본이다 — msgs(대화에 저장될 원문)는 그대로 둔다.
+                # 오래된 도구 결과를 접지 않으면 문서를 몇 번만 읽어도 ctx가 차고,
+                # 넘치는 순간 system 프롬프트가 밀려나 대화가 조용히 망가진다.
+                messages=age_messages(msgs, settings),
                 stream=True,
                 tools=tool_specs or NOT_GIVEN,
                 temperature=settings.get("temperature", 1.0),
@@ -213,6 +223,11 @@ async def run_chat(
                 else:
                     result = await _execute_tool(
                         mcp, call["name"], call["args"], memory, approved=True)
+                    if observer is not None:
+                        try:
+                            observer(call["name"], call["args"])
+                        except Exception:  # noqa: BLE001 — 기록 실패가 대화를 끊지 않게
+                            pass
                 yield {"type": "tool_result", "name": call["name"],
                        "result": result[:4000], "executed": approved}
                 msgs.append({"role": "tool", "tool_call_id": call["id"], "content": result})

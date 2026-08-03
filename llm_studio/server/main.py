@@ -34,7 +34,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent, planner
+from . import agent, context, planner, worklog
 from .approvals import ApprovalBroker
 from .config import (
     REMOTE_SETTABLE_KEYS,
@@ -181,9 +181,12 @@ def create_app(state) -> FastAPI:
         # 회상(읽기): 원본 메시지로 관련 기억을 찾아 system에 주입한다. 검색 질의는
         # 첨부 텍스트가 아니라 사용자가 친 원문(req.message)을 쓴다.
         memory_enabled = state.config.get("memory_enabled", True)
-        system_content = _build_system(state, req.message)
+        system_content = _build_system(state, req.message, conv)
         msgs = [{"role": "system", "content": system_content}, *conv["messages"]]
         mem = state.memory if memory_enabled else None
+        # 작업 대장 관찰자 — 실행된 도구 호출을 conv["worklog"]에 쌓는다(일반 채팅·작업
+        # 모드 공통). 대장은 아래 event_stream의 store.save로 대화와 함께 저장된다.
+        observer = worklog.make_observer(conv, state.config)
 
         # 라우터: 작업 모드 요청이면 계획-실행으로 분기한다. 단순 대화는 기존 경로.
         # 목 모드에선 계획을 세울 수 없으므로 항상 일반 채팅으로 처리한다.
@@ -196,18 +199,30 @@ def create_app(state) -> FastAPI:
                 messages=msgs, settings=state.config, mcp=state.mcp, memory=mem,
                 max_steps=int(state.config.get("task_max_steps", 10)),
                 max_replans=int(state.config.get("task_max_replans", 2)),
-                approver=approvals,
+                approver=approvals, observer=observer,
             )
         else:
+            # 도구 스코프: 질문·첨부에서 필요한 서버가 분명하면 그 서버 도구만 노출한다.
+            # 확신이 없으면 None(전체)이 돌아온다. 작업 모드는 계획가가 단계마다 직접
+            # 서버를 고르므로(planner의 [서버] 태그) 여기서 건드리지 않는다.
+            tool_servers = context.pick_tool_servers(
+                state.mcp, req.message, state.config,
+                required=_servers_for_attachments(state, req.attachments),
+            )
             runner = agent.run_chat(
                 base_url=provider["base_url"], model=provider["model"],
                 api_key=provider["api_key"], send_top_k=provider["send_top_k"],
                 messages=msgs, settings=state.config, mcp=state.mcp, memory=mem,
-                mock=provider["mock"], approver=approvals,
+                mock=provider["mock"], approver=approvals, tool_servers=tool_servers,
+                observer=observer,
             )
 
         async def event_stream():
-            yield _sse({"type": "meta", "conversation_id": conv["id"], "title": conv["title"]})
+            yield _sse({
+                "type": "meta", "conversation_id": conv["id"], "title": conv["title"],
+                # 디버깅용 — 이번 턴에 어떤 서버로 좁혔는지(None이면 전체). UI는 무시한다.
+                "tool_scope": None if use_task else tool_servers,
+            })
             streamed: list[str] = []
             finished = False
             try:
@@ -495,14 +510,26 @@ def create_app(state) -> FastAPI:
     return app
 
 
-def _build_system(state, query: str) -> str:
-    """system 프롬프트에 관련 장기 기억을 [기억] 블록으로 덧붙인다.
+def _build_system(state, query: str, conv: dict | None = None) -> str:
+    """system 프롬프트에 [작업 중인 문서](중기)와 [기억](장기)을 덧붙인다.
 
     회상(읽기)은 모델의 도구 호출에 맡기지 않고 하네스가 매 턴 결정적으로 주입한다
-    (약한 로컬 모델도 확실히 기억을 참고하도록). 메모리가 꺼져 있거나 검색이
-    실패하거나 관련 기억이 없으면 원래 프롬프트를 그대로 쓴다 — 우아하게 저하한다.
+    (약한 로컬 모델도 확실히 참고하도록). 어느 쪽이든 꺼져 있거나 실패하거나 내용이
+    없으면 그 블록만 빠지고 나머지는 그대로 간다 — 우아하게 저하한다.
+
+    ⚠ 작업 모드(planner)의 **스텝 프롬프트에는 이 블록이 안 들어간다** — 스텝은 좁은
+    컨텍스트만 준다는 planner의 설계 때문이다. 계획 수립과 최종 종합은 이 system을
+    포함한 messages를 쓰므로 블록을 본다.
     """
     base = state.config["system_prompt"]
+    if conv is not None:
+        try:
+            block = worklog.render(conv, state.config)
+        except Exception as e:  # noqa: BLE001 — 대장 렌더 실패가 채팅을 막지 않게
+            print(f"[주의] 작업 대장 표시 실패, 건너뜁니다: {e}")
+            block = ""
+        if block:
+            base = f"{base}\n\n{block}"
     if not state.config.get("memory_enabled", True):
         return base
     try:
@@ -657,6 +684,27 @@ def _pick_read_tool(state, ext: str) -> str:
             if pref in n.lower():
                 return n
     return cands[0]
+
+
+def _servers_for_attachments(state, attachment_ids: list[str]) -> list[str]:
+    """첨부 파일 형식이 요구하는 MCP 서버들 (도구 스코프에서 '반드시 포함'으로 쓴다).
+
+    .xlsx를 붙였는데 도구 스코프가 office를 빼 버리면 그 파일을 아예 못 읽는다 —
+    그래서 첨부에서 나온 서버는 무조건 살린다.
+    """
+    if not attachment_ids:
+        return []
+    keywords: set[str] = set()
+    for file_id in attachment_ids:
+        found = state.uploads.get(file_id)
+        if found is None:
+            continue
+        meta, _text = found
+        ext = os.path.splitext(meta.get("name", ""))[1].lower()
+        keywords.update(_EXT_TOOL_KEYWORDS.get(ext, ()))
+    if not keywords:
+        return []
+    return context.servers_for_tools(state.mcp, tuple(keywords))
 
 
 def _with_attachments(state, message: str, attachment_ids: list[str]) -> str:

@@ -74,6 +74,25 @@ DEFAULT_CONFIG = {
     "approval_enabled": True,
     "approval_timeout": 600,   # 승인 대기 제한(초). 0 이하 = 무제한 대기. 초과 시 실행하지 않음(거절과 동일)
     "approval_tools": [],      # 항상 승인이 필요한 도구 이름 목록 (send_email 또는 outlook__send_email)
+    # ── 컨텍스트 관리 ──
+    # 도구 결과는 하나가 최대 TOOL_RESULT_MAX(2만 자)까지 이력에 남고 매 턴 다시 보내진다.
+    # 아무 것도 안 하면 read_excel_range 몇 번에 ctx가 차고, 넘치면 앞부분(=system
+    # 프롬프트와 초반 지시)이 조용히 밀려나 응답 품질이 무너진다. 그래서 오래된 도구
+    # 결과는 접어서 보낸다 — **접는 건 모델에 보내는 사본뿐이고 대화 기록 원문은 그대로다**.
+    "context_aging_enabled": True,
+    "context_tool_keep_turns": 2,     # 현재 턴 포함 최근 이 턴 수의 도구 결과는 원문 유지
+    "context_tool_aged_chars": 200,   # 그보다 오래된 도구 결과는 이 길이로 접는다
+    # ── 도구 스코프 ──
+    # 서버를 여럿 붙이면 도구가 수십 개가 되고, 약한 로컬 모델은 그중에서 고르길 어려워한다.
+    # 질문·첨부에서 어느 서버가 필요한지 확실할 때만 그 서버 도구만 노출한다.
+    # 애매하면 전체를 보여준다 — 잘못 좁혀서 '못 한다'고 답하는 게 더 나쁘기 때문이다.
+    "tool_scope_enabled": True,
+    "tool_scope_keywords": {},        # 비우면 DEFAULT_TOOL_SCOPE_KEYWORDS 사용
+    # ── 작업 대장(이 대화에서 읽고 고친 문서) ──
+    # 매 턴 system에 주입해 (1) 같은 범위를 다시 읽는 낭비 (2) 저장하지 않은 변경을
+    # 저장했다고 답하는 환각을 막는다.
+    "worklog_enabled": True,
+    "worklog_max_items": 12,
     # 첨부 처리. True면 Office 문서(docx/xlsx/pptx)를 서버가 바이트로 추출하지 않고
     # 저장 경로를 모델에 줘서 office MCP 도구(COM)가 읽게 한다. 사내 DRM처럼 파일이
     # 암호화돼 바이트 파싱은 암호문만 나오고 Word/Excel(COM)로 열어야만 복호화되는
@@ -124,6 +143,25 @@ def restore_api_keys(new_providers: list, old_providers: list) -> list:
     return out
 
 DEFAULT_MCP_CONFIG = {"mcpServers": {}}
+
+# 서버 이름 → 그 서버가 필요하다는 신호가 되는 낱말. 질문에 이 낱말이 있으면 그 서버로
+# 도구를 좁힌다(tool_scope). config의 tool_scope_keywords로 통째로 갈아끼울 수 있다.
+#
+# ⚠ **일반적인 낱말을 넣지 말 것.** '문서', '검색', '알려줘' 같은 걸 넣으면 거의 모든
+# 질문이 그 서버에 걸려 다른 서버 도구가 사라진다 — 좁히지 않느니만 못하다. 특정 앱·형식을
+# 콕 집는 낱말만 넣고, 애매하면 아무 것도 안 걸리게 두는 편이 안전하다(그러면 전체 노출).
+DEFAULT_TOOL_SCOPE_KEYWORDS = {
+    "office": ["엑셀", "excel", "xlsx", "xls", "워드", "word", "docx", "파워포인트",
+               "powerpoint", "ppt", "pptx", "스프레드시트", "통합문서", "시트", "셀",
+               "수식", "슬라이드"],
+    "outlook": ["메일", "이메일", "e-mail", "mail", "outlook", "아웃룩", "받은편지함",
+                "보낸편지함", "일정", "캘린더", "회의", "약속", "연락처", "주소록",
+                "초안", "발송", "참조자"],
+    "docs": ["규정", "지침", "매뉴얼", "사규", "사내문서", "사내 문서", "rag"],
+    "pdf": ["pdf", "피디에프"],
+    "catia": ["catia", "카티아", "스케치", "파트", "어셈블리", "모델링", "형상", "치수"],
+    "ansys": ["ansys", "앤시스", "mapdl", "열해석", "해석", "메시", "시뮬레이션", "경계조건"],
+}
 
 # 같은 저장소의 mcp_server/ 서버들을 앱이 **자식 프로세스(stdio)로 직접 띄우기** 위한 목록.
 # 이게 있으면 run_*.bat을 따로 실행하지 않아도 앱만 켜면 도구가 붙는다.
