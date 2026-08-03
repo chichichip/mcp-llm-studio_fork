@@ -171,6 +171,9 @@ def create_app(state) -> FastAPI:
         conv = state.store.load(req.conversation_id) if req.conversation_id else None
         if conv is None:
             conv = state.store.create(state.store.title_from(req.message))
+        # 이번 턴 직전까지의 이력 길이. 저장할 때 넘겨서, 응답이 흐르는 동안 다른 탭이
+        # 같은 대화에 쓴 게 있으면 덮어쓰지 않고 병합하게 한다.
+        base_count = len(conv["messages"])
 
         user_content = _with_attachments(state, req.message, req.attachments)
         conv["messages"].append({"role": "user", "content": user_content})
@@ -225,7 +228,7 @@ def create_app(state) -> FastAPI:
                     conv["messages"].append(
                         {"role": "assistant", "content": "".join(streamed) + "\n\n*(중단됨)*"}
                     )
-                state.store.save(conv)
+                state.store.save(conv, base_count=base_count)
                 # 쓰기(자동요약): 정상 완료된 턴에서만, 트리거가 맞으면 사실을 추출해 저장한다.
                 # 사용자는 이미 응답을 다 받았으므로 여기서의 지연은 스트림 종료만 늦춘다.
                 if finished:
@@ -563,7 +566,9 @@ async def _maybe_autosummarize(state, conv: dict, provider: dict) -> None:
         # 성공/실패와 무관하게 이번 시점을 기록해 다음 트리거까지 재실행을 막는다.
         conv["memory_summarized_turn"] = turns
         conv["memory_summarized_chars"] = chars
-        state.store.save(conv)
+        # 메시지는 안 늘렸으므로 현재 길이를 기준으로 준다 — 그 사이 다른 탭이 쓴 턴이
+        # 있으면 그쪽을 살리고 이 메타데이터만 얹는다.
+        state.store.save(conv, base_count=len(msgs))
 
 
 def _is_local(request: Request) -> bool:

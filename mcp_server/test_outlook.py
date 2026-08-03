@@ -13,7 +13,9 @@ AITF의 test_tools.py와 같은 취지의 수동 점검 스크립트입니다.
       지우지 않습니다. 이 스크립트는 confirm=True를 어디에서도 넘기지 않습니다.
 
 사용법
-    cd Examples 가 아니라 outlook_server.py 가 있는 폴더(AITF)에서 실행하세요.
+    outlook_server.py 와 같은 폴더(mcp_server/)에서 실행하세요 — 같은 폴더의
+    outlook_server를 import 합니다.
+        cd mcp_server
         python test_outlook.py                # 🟢 읽기 + 🔴 프리뷰만
         python test_outlook.py --create       # 🟡 생성(초안/일정/연락처/작업)까지 (생성 후 삭제)
         python test_outlook.py --folder inbox --limit 5

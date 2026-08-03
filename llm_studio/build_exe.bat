@@ -1,26 +1,29 @@
 @echo off
-REM LocalLLM Studio exe 빌드 스크립트
-REM 사전 조건: pip install -r requirements.txt pyinstaller
+REM LocalLLM Studio exe build script.
+REM Prerequisites: pip install -r requirements.txt pyinstaller
+REM English/ASCII only - cmd reads this file as cp949, so Korean text is garbled.
+REM UTF-8 console so unicode in paths/PyInstaller output does not break.
 chcp 65001 >nul
 cd /d "%~dp0"
 
-echo [1/2] PyInstaller 빌드...
+echo [1/2] PyInstaller build...
 pyinstaller --noconfirm LocalLLMStudio.spec
 if errorlevel 1 (
-  echo 빌드 실패!
+  echo BUILD FAILED.
   exit /b 1
 )
 
-echo [2/2] llama-server 동봉 확인...
+echo [2/2] Checking bundled llama-server...
 if exist llama\llama-server.exe (
   xcopy /e /i /y llama dist\LocalLLMStudio\llama >nul
-  echo   llama\ 폴더를 dist에 복사했습니다.
+  echo   Copied llama\ into dist.
 ) else (
-  echo   [주의] llama\llama-server.exe가 없습니다.
-  echo   llama.cpp 릴리스의 win-cuda-x64 빌드를 풀어 llama\ 폴더에 넣으면
-  echo   exe와 함께 배포됩니다. (없으면 앱이 목 모드로 시작됩니다)
+  echo   [WARN] llama\llama-server.exe not found.
+  echo   Unpack the llama.cpp win-cuda-x64 release into llama\ to ship it
+  echo   together with the exe. Without it the app starts idle and you pick
+  echo   a model in the UI later.
 )
 
 echo.
-echo 완료: dist\LocalLLMStudio\LocalLLMStudio.exe
-echo 다음 단계: Inno Setup으로 installer.iss를 컴파일하면 Setup.exe가 나옵니다.
+echo Done: dist\LocalLLMStudio\LocalLLMStudio.exe
+echo Next: compile installer.iss with Inno Setup to produce Setup.exe

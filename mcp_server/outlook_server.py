@@ -1092,10 +1092,11 @@ def create_draft(
     importance: str = "",
     display: bool = True,
 ) -> str:
-    """새 메일 초안을 만듭니다(보내지 않습니다).
+    """새 메일 초안을 만듭니다(보내지 않습니다). (🟡)
 
-    실제 발송은 이 버전에 없습니다 — 초안을 만들어 두면 사용자가 Outlook에서 확인 후
-    직접 보내거나, 다음 버전의 승인형 발송 도구로 보냅니다.
+    만들어 두면 사용자가 Outlook에서 확인하고 직접 보낼 수 있습니다. 여기서 바로
+    보내려면 send_draft(entry_id, confirm=True)를, 초안 없이 한 번에 보내려면
+    send_email(confirm=True)를 쓰세요 — 둘 다 🔴라 confirm이 있어야 실제로 나갑니다.
 
     Args:
         to/cc/bcc: 수신자(세미콜론/쉼표로 여러 명). 이름 또는 이메일 주소.
@@ -1405,9 +1406,9 @@ def create_appointment(
     all_day: bool = False,
     busy: str = "busy",
 ) -> str:
-    """개인 일정(약속)을 만듭니다. 참석자 초대는 보내지 않습니다.
+    """개인 일정(약속)을 만듭니다. 참석자 초대는 보내지 않습니다. (🟡)
 
-    참석자에게 초대장이 나가는 '회의'는 승인 게이팅과 함께 다음 버전에서 추가합니다.
+    참석자에게 초대장이 나가는 '회의'는 create_meeting(🔴, confirm 필요)을 쓰세요.
 
     Args:
         subject: 제목.
