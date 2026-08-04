@@ -171,6 +171,8 @@ DEFAULT_TOOL_SCOPE_KEYWORDS = {
                 "보낸편지함", "일정", "캘린더", "회의", "약속", "연락처", "주소록",
                 "초안", "발송", "참조자"],
     "docs": ["규정", "지침", "매뉴얼", "사규", "사내문서", "사내 문서", "rag"],
+    "intranet": ["포털", "사내망", "인트라넷", "sharepoint", "쉐어포인트", "그룹웨어",
+                 "게시판", "공지", "사내 사이트", "사내사이트"],
     "pdf": ["pdf", "피디에프"],
     "catia": ["catia", "카티아", "스케치", "파트", "어셈블리", "모델링", "형상", "치수"],
     "ansys": ["ansys", "앤시스", "mapdl", "열해석", "해석", "메시", "시뮬레이션", "경계조건"],
@@ -191,6 +193,9 @@ MCP_BUNDLED_SERVERS = (
     ("pdf", "pdf_server.py", True),
     ("catia", "catia_server.py", False),
     ("ansys", "ansys_server.py", False),
+    # 사내 포털은 사이트 주소·계정을 먼저 설정해야 쓸 수 있다. 설정 전에 켜 두면
+    # 도구만 늘고 모두 안내만 돌려주므로 꺼 둔다 (intranet_server.py 참고).
+    ("intranet", "intranet_server.py", False),
 )
 
 

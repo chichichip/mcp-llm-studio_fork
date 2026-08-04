@@ -91,6 +91,21 @@ PyMAPDL(`ansys-mapdl-core`, gRPC)로 MAPDL을 조종해 열해석(정상상태·
 - **word_com은 hang-safe**다: Word의 'PDF를 편집 가능한 문서로 변환' 확인창은 `DisplayAlerts=0`으로 안 꺼지므로(개발 PC 재현), Open을 데몬 스레드에서 돌리고 워치독이 그 대화상자를 자동 확인하며 `WORD_TIMEOUT`(기본 90초) 초과 시 **우리가 띄운 Word PID만**(생성 전후 차집합) taskkill한다 — 사용자 Word는 건드리지 않고, 막혀도 MCP 서버가 얼지 않는다.
 - ⚠ 실기 검증 대상: DRM이 **Word.exe에 .pdf 복호화까지 허용하는지**(확장자 스코프 DRM이면 막힐 수 있음), 대화상자 자동 확인이 실기에서 실제로 통하는지. **서버 없이 `python mcp_server\pdf_server.py --probe <PDF경로>`로 각 백엔드를 진단**할 것. 개발 PC엔 실제 DRM이 없어(nProtect만 상주) word_com의 성공 여부는 사내 PC에서만 확정된다. `pypdf`는 `llm_studio`가 이미 쓰던 것을 루트 requirements.txt에 추가했다.
 
+### `mcp_server/intranet_server.py` — 사내 포털(SharePoint) 검색 MCP 서버
+
+사내 SharePoint/그룹웨어를 검색해 읽어오는 읽기 전용(🟢) 서버. 도구 3개: `search_intranet`(검색 API 질의) / `read_intranet_page`(페이지 본문) / `intranet_status`(진단). http/sse는 :8093.
+
+설계 선택 세 가지가 핵심이다:
+- **인덱싱이 아니라 실시간 조회.** SharePoint에는 검색 API(`/_api/search/query`)가 내장돼 있어 관련도 랭킹까지 서버가 해 준다 — rag_server처럼 임베딩·인덱싱할 이유가 없다(사내 포털은 자주 바뀌어 인덱스가 금방 낡기도 한다). 나중에 '자주 보는 문서만 인덱싱'을 얹고 싶으면 rag_core를 재사용하면 된다.
+- **인증에 새 패키지를 쓰지 않는다.** requests+requests-ntlm은 사내 미러에 없을 위험이 큰데, 이미 의존성인 pywin32의 **WinHTTP COM**(`WinHttp.WinHttpRequest.5.1`)이 NTLM/Negotiate/Basic을 다 처리한다. 계정을 안 주면 `SetAutoLogonPolicy(0)`으로 Windows 통합 인증(SSO)이 된다. office_server가 Word COM으로 DRM 문서를 읽는 것과 같은 발상 — OS가 이미 할 줄 아는 일을 빌려 쓴다. pywin32가 없으면 urllib로 저하한다(인증 없는 사이트만).
+- **HTML 파싱도 표준 라이브러리**(`html.parser`)로 한다. beautifulsoup4 불필요. `_TextExtractor`가 script/style/nav/footer를 건너뛰고 표는 셀을 탭으로 이어 한 행이 한 줄이 되게 한다(office_server의 Word 표 처리와 같은 방침). 인라인 태그(`<b>`) 앞뒤 공백을 살리지 않으면 '연차는입사일'처럼 낱말이 붙으니 주의.
+
+- 자격 증명은 **Windows 자격 증명 관리자**(win32cred)에 저장한다 — `--save-credential`. 평문 파일에 두지 않는다. 환경변수 `INTRANET_USER`/`INTRANET_PASSWORD`는 임시 시험용 폴백.
+- `read_intranet_page`는 **SITE_URL과 호스트가 다르면 거부**한다 — 인터넷 의존 금지 규약을 코드로 지킨다.
+- SSL 검증을 끄는 옵션은 **일부러 두지 않았다.** WinHTTP는 Windows 인증서 저장소를 쓰므로 사내 CA가 GPO로 배포된 도메인 PC에서는 그냥 통과한다. 오류가 나면 CA를 신뢰 저장소에 넣는 게 옳은 해결이다.
+- ⚠ 실기 검증 대상: SharePoint 버전별 검색 응답 껍데기(`_search_rows`가 nometadata/verbose 양쪽을 받게 해 뒀다), WinHTTP 인증 협상. **서버 없이 `python mcp_server\intranet_server.py --probe "질의"`로 단계별 진단**할 것.
+- llm_studio에는 `intranet`으로 등록되지만 **기본 `disabled`** — 사이트 주소·계정을 설정하기 전에는 도구만 늘기 때문이다.
+
 ### `llm_studio/serve_llm.py` — 헤드리스 LLM 서빙
 
 로컬 GGUF 모델을 llama.cpp의 `llama-server`로 띄워 OpenAI 호환 API(`/v1/chat/completions`)를 여는 CLI 스크립트. LangChain·n8n·HTML 페이지 등이 `base_url`만 바꿔 붙는 용도다. 표준 라이브러리만 쓰므로 pip 의존성이 없고, 대신 `llama-server` 실행 파일과 `.gguf`를 별도 반입해야 한다. (LLM 서빙 관련 코드를 한곳에 모으려고 앱과 같은 `llm_studio/`에 둔다.)

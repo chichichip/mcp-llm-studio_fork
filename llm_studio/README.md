@@ -109,6 +109,18 @@ build_exe.bat               # → dist\LocalLLMStudio\
 | `pdf` | pdf_server.py | 켬 |
 | `catia` | catia_server.py | **끔** (CATIA 설치 PC에서만 켤 것) |
 | `ansys` | ansys_server.py | **끔** (ANSYS 설치 PC에서만 켤 것) |
+| `intranet` | intranet_server.py | **끔** (사내 포털 주소·계정 설정 후 켤 것) |
+
+`intranet`(사내 SharePoint 검색)을 쓰려면 먼저 설정해야 한다:
+
+```bat
+cd mcp_server
+python intranet_server.py --site https://portal.company.com/sites/team --save-credential
+python intranet_server.py --probe "휴가 규정"     REM 연결·검색 진단
+```
+
+계정은 Windows 자격 증명 관리자에 암호화돼 저장된다(평문 파일 없음). 그다음 설정 →
+MCP에서 `intranet`의 disabled를 풀고 [MCP 저장 + 재연결].
 
 - CATIA/ANSYS를 기본으로 꺼 두는 이유: 그 제품이 없는 PC에서는 도구 목록만 길어지고,
   도구가 많아질수록 약한 로컬 모델의 도구 선택 정확도가 떨어진다. 설정 → MCP에서 켠다.
