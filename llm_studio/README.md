@@ -221,6 +221,30 @@ Google Gemini / 직접 입력(사내 게이트웨이 등). OpenAI 호환 `chat/c
   정확도가 높아 MCP 활용에는 오히려 유리하다.
 - 폐쇄망에서는 외부 API 대신 사내 프록시/게이트웨이 주소를 등록하는 용도로 쓴다.
 
+## 포트가 물려 있을 때
+
+UI 기본 포트는 8080인데, Windows에서 가장 많이 겹치는 포트다(Docker Desktop, Jenkins,
+Tomcat, Oracle XE, 사내 보안/자산관리 에이전트…). 이미 쓰이고 있으면 앱이 **다음 빈
+포트로 옮겨서** 뜨고 콘솔에 이렇게 알린다:
+
+```
+[주의] 포트 8080이(가) 이미 사용 중이라 8081로 옮겨서 실행합니다.
+       무엇이 쓰는지 확인:  netstat -ano | findstr :8080
+       ...
+       계속 이 포트를 쓰려면 run_app.bat에 --port 8081 를 넣으세요.
+```
+
+- `netstat`에 **아무것도 안 나오는데도** 막히면 Windows가 예약한 대역일 수 있다:
+  `netsh int ipv4 show excludedportrange protocol=tcp` (Hyper-V/WSL/Docker가 예약한다.
+  재부팅해도 안 풀린다.)
+- 옮기지 않고 오류로 끝내려면 `--strict-port`.
+- 매번 같은 포트를 쓰려면 `run_app.bat`의 마지막 줄을 `"%PY%" app.py --port 8090 %*`처럼 고친다.
+
+⚠ 포트가 물려 죽으면 그 시점에 MCP 자식 프로세스는 이미 떠 있어서 로그가 뒤엉킨다.
+그때 UI가 보인다면 **예전에 죽다 만 인스턴스**일 수 있다 — 그 인스턴스는 기동 시점의
+낡은 `mcp_servers.json`을 들고 있어서 MCP가 전부 연결 실패로 보인다. 이럴 땐 8080을
+잡고 있는 프로세스를 먼저 정리할 것(`netstat -ano | findstr :8080` → `taskkill /PID <번호> /F`).
+
 ## 참고/제약
 
 - llama-server는 `--jinja`로 실행되어 Gemma의 chat template 기반 함수 호출을 쓴다.

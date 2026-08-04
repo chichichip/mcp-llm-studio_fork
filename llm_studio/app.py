@@ -18,6 +18,11 @@ serve_llm.py 등으로 이미 떠 있는 서버에 붙거나(external). 후자�
 인터페이스(UI)를 따로 실행해 두고 연결하는 구성으로, 여러 클라이언트가 한 서버를
 공유하고 앱을 껐다 켜도 모델이 유지된다.
 
+UI 포트(기본 8080)가 이미 쓰이고 있으면 **다음 빈 포트로 옮겨서** 뜬다. 8080은 Windows에서
+Docker/Jenkins/Tomcat/사내 에이전트 등과 자주 겹치는데, 예전에는 uvicorn이 bind 단계에서
+죽으면서 ExceptionGroup 스택만 남아 원인을 알아보기 어려웠다. 옮기지 않고 오류로 끝내려면
+--strict-port.
+
 사용:
     python app.py                    # 기본 (UI 포트 8080, 유휴 상태로 시작 — UI에서 모델 선택)
     python app.py --host 0.0.0.0     # 같은 망의 다른 PC에서 접속 허용
@@ -30,6 +35,7 @@ PyInstaller로 묶으면 이 파일이 exe의 진입점이 된다.
 from __future__ import annotations
 
 import argparse
+import socket
 import sys
 import threading
 import time
@@ -86,6 +92,59 @@ def build_state(args) -> SimpleNamespace:
     return state
 
 
+PORT_SCAN_LIMIT = 20  # 요청한 포트부터 몇 개까지 훑어볼지
+
+
+def _port_available(host: str, port: int) -> bool:
+    """그 주소에 실제로 bind해 보고 되돌린다. 되면 True."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        # SO_REUSEADDR을 일부러 켜지 않는다 — Windows에서는 이 옵션이 '이미 쓰는 포트를
+        # 빼앗기'를 허용해서, 켜면 실제로는 물려 있는 포트를 비어 있다고 오판한다.
+        try:
+            sock.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def _resolve_port(host: str, port: int, strict: bool) -> int:
+    """쓸 수 있는 UI 포트를 정한다. 요청한 포트가 물려 있으면 다음 빈 포트로 옮긴다.
+
+    8080은 Windows에서 가장 많이 겹치는 포트다(Docker/Jenkins/Tomcat/사내 에이전트…).
+    이 확인이 없으면 uvicorn이 bind 단계에서 ExceptionGroup 스택을 뱉고 죽는데, 그 와중에
+    이미 떠 있는 MCP 자식 프로세스 로그까지 섞여서 원인을 알아보기가 매우 어렵다.
+    그래서 **아무것도 띄우기 전에** 여기서 먼저 확인하고 사람이 읽을 수 있게 알린다.
+
+    (미세한 경합은 있다 — 확인과 uvicorn의 실제 bind 사이에 누가 가져갈 수 있다.
+     그건 어차피 uvicorn이 오류를 내므로 여기서는 흔한 경우만 잡는다.)
+    """
+    if _port_available(host, port):
+        return port
+
+    hint = (
+        f"       무엇이 쓰는지 확인:  netstat -ano | findstr :{port}\n"
+        "       아무것도 안 나오면 Windows가 예약한 대역일 수 있습니다:\n"
+        "         netsh int ipv4 show excludedportrange protocol=tcp"
+    )
+    if strict:
+        sys.exit(
+            f"[오류] 포트 {port}이(가) 이미 사용 중입니다 (--strict-port).\n{hint}\n"
+            f"       다른 포트로 실행하려면: --port <번호>"
+        )
+    for cand in range(port + 1, port + PORT_SCAN_LIMIT + 1):
+        if _port_available(host, cand):
+            print(
+                f"[주의] 포트 {port}이(가) 이미 사용 중이라 {cand}로 옮겨서 실행합니다.\n"
+                f"{hint}\n"
+                f"       계속 이 포트를 쓰려면 run_app.bat에 --port {cand} 를 넣으세요."
+            )
+            return cand
+    sys.exit(
+        f"[오류] {port}~{port + PORT_SCAN_LIMIT} 사이에 쓸 수 있는 포트가 없습니다.\n{hint}\n"
+        f"       --port <번호>로 다른 대역을 지정하세요."
+    )
+
+
 def _start_key_listener(url: str) -> None:
     """콘솔에서 'o'=브라우저 다시 열기, 'q'=종료 (n8n 스타일 편의 기능).
 
@@ -137,7 +196,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="LocalLLM Studio — 로컬 LLM 채팅 스튜디오")
     parser.add_argument("--host", default="127.0.0.1",
                         help="UI 바인딩 주소. 다른 PC에서 접속하려면 0.0.0.0 (기본 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=8080, help="UI 포트 (기본 8080)")
+    parser.add_argument("--port", type=int, default=8080,
+                        help="UI 포트 (기본 8080). 이미 쓰이고 있으면 다음 빈 포트로 옮긴다")
+    parser.add_argument("--strict-port", action="store_true",
+                        help="포트가 물려 있어도 다른 포트로 옮기지 않고 오류로 끝낸다")
     parser.add_argument("--data-dir", default=None, help="데이터 폴더 직접 지정")
     parser.add_argument("--mock", action="store_true", help="모델 없이 UI만 실행")
     parser.add_argument("--no-browser", action="store_true", help="브라우저 자동 열기 끄기")
@@ -146,6 +208,10 @@ def main() -> None:
                              "http://127.0.0.1:8000). 지정하면 자체 llama-server를 띄우지 않고 "
                              "그 서버를 공유하며, 앱을 껐다 켜도 그 서버는 유지된다")
     args = parser.parse_args()
+
+    # 포트 확인은 **아무것도 띄우기 전에** 한다 — 여기서 물러설 거면 llama-server나
+    # MCP 자식 프로세스를 괜히 띄웠다 정리하는 일이 없도록.
+    args.port = _resolve_port(args.host, args.port, args.strict_port)
 
     state = build_state(args)
 
