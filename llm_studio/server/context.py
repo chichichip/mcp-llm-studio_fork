@@ -59,6 +59,93 @@ def age_messages(messages: list[dict], settings: dict) -> list[dict]:
     return out
 
 
+def _condense(text: str, limit: int) -> str:
+    """여러 줄 설명을 한 줄로 눌러 담고 길면 자른다. 문장 경계에서 끊으려 시도한다."""
+    text = " ".join((text or "").split())
+    if limit <= 0 or not text:
+        return "" if limit <= 0 else text
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    # 문장 끝에서 끊는다(말이 어중간하게 잘려 보이지 않게). 다만 그러느라 너무 많이
+    # 버리면 정보가 사라지므로, 상한의 40% 이상 남을 때만 문장 경계를 쓴다.
+    ends = [cut.rfind(m) + len(m) for m in ("다. ", ". ", "요. ", "! ", "? ")]
+    best = max(ends)
+    if best >= max(1, int(limit * 0.4)):
+        return cut[:best].strip()
+    return cut.strip() + "…"
+
+
+def _first_paragraph(text: str, limit: int) -> str:
+    """도구 설명에서 **첫 문단만** 남긴다.
+
+    이 저장소의 도구 docstring은 '요약 한 줄 → 빈 줄 → 상세'로 되어 있고, Args/Returns는
+    FastMCP가 이미 파라미터 스키마 쪽으로 옮겨 둔다. 그래서 첫 문단만 남겨도 '이 도구가
+    무엇을 하는가'는 온전히 남고, 뒤쪽 상세(주의사항·복구 방법 등)만 빠진다 — 그건 도구를
+    **고르는** 데는 필요 없고, 실제로 필요한 시점에는 도구 응답과 [작업 중인 문서] 블록이
+    같은 내용을 알려 준다.
+    """
+    head = (text or "").strip().split("\n\n", 1)[0]
+    return _condense(head, limit)
+
+
+def _slim_schema(schema, arg_limit: int):
+    """파라미터 스키마에서 군더더기를 덜어낸다(설명 축약, title 제거).
+
+    type/enum/default/required 같은 **동작에 영향을 주는 것은 절대 건드리지 않는다** —
+    이것들이 빠지면 모델이 잘못된 인자를 만든다.
+    """
+    if isinstance(schema, list):
+        return [_slim_schema(v, arg_limit) for v in schema]
+    if not isinstance(schema, dict):
+        return schema
+    out = {}
+    for key, value in schema.items():
+        if key == "title":
+            continue  # 속성 이름과 중복이라 순수 낭비
+        if key == "description" and isinstance(value, str):
+            slim = _condense(value, arg_limit)
+            if slim:
+                out[key] = slim
+            continue
+        out[key] = _slim_schema(value, arg_limit)
+    return out
+
+
+def slim_tools(tools: list[dict], settings: dict) -> list[dict]:
+    """모델에 보낼 도구 스키마를 줄인다. 원본 리스트/딕트는 건드리지 않는다.
+
+    도구 스키마는 **매 요청마다 통째로** 다시 보내진다. 서버 넷을 붙이면 도구가 67개,
+    스키마만 4만 자에 가깝다 — 컨텍스트가 빠듯한 게이트웨이(vLLM 등)에서는 이것만으로
+    한도를 넘길 수 있다. 이력 접기(age_messages)가 과거를 줄인다면 이쪽은 매 요청의
+    고정 비용을 줄인다.
+
+    ⚠ 너무 줄이면 약한 모델의 도구 선택 정확도가 떨어진다. 도구를 고르는 데 필요한
+    첫 문단은 남기고, 고르고 난 뒤에야 의미 있는 상세만 덜어내는 게 요령이다.
+    """
+    if not settings.get("tool_schema_slim", True):
+        return tools
+    try:
+        desc_max = int(settings.get("tool_schema_desc_chars", 200))
+        arg_max = int(settings.get("tool_schema_arg_chars", 80))
+    except (TypeError, ValueError):
+        desc_max, arg_max = 200, 80
+
+    out: list[dict] = []
+    for tool in tools:
+        fn = tool.get("function")
+        if not isinstance(fn, dict):
+            out.append(tool)
+            continue
+        slim_fn = dict(fn)
+        slim_fn["description"] = _first_paragraph(fn.get("description", ""), desc_max)
+        params = fn.get("parameters")
+        if isinstance(params, dict):
+            slim_fn["parameters"] = _slim_schema(params, arg_max)
+        out.append({**tool, "function": slim_fn})
+    return out
+
+
 def estimate_chars(messages: list[dict]) -> int:
     """이력의 대략적인 크기(문자). 토큰이 아니라 문자다 — 상대 비교용."""
     return sum(len(str(m.get("content") or "")) for m in messages)
@@ -122,7 +209,12 @@ def pick_tool_servers(mcp, query: str, settings: dict,
                 picked.add(name)
                 break
 
-    if not picked or len(picked) == len(servers):
+    if not picked:
+        # 어느 서버인지 못 정했다. 기본은 전체 노출이지만, 게이트웨이 컨텍스트가 빠듯해
+        # 도구를 다 보낼 수 없으면 tool_scope_fallback으로 '기본 세트'를 지정할 수 있다.
+        fallback = [s for s in (settings.get("tool_scope_fallback") or []) if s in servers]
+        return fallback or None
+    if len(picked) == len(servers):
         return None
     # 연결 순서를 유지해 돌려준다(로그·표시가 안정적이도록)
     return [s for s in servers if s in picked]

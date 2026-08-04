@@ -32,7 +32,7 @@ from typing import AsyncIterator
 from openai import AsyncOpenAI, NOT_GIVEN
 
 from .config import DEFAULT_CONFIG
-from .context import age_messages
+from .context import age_messages, slim_tools
 
 MAX_TOOL_ROUNDS = 8       # 무한 도구 루프 방지 (settings의 max_tool_rounds가 없을 때 기본값)
 TOOL_RESULT_MAX = 20000   # 도구 결과가 컨텍스트를 다 먹지 않게 자르는 한도 (문자)
@@ -124,6 +124,8 @@ async def run_chat(
     tool_specs = list(mcp.openai_tools(servers=tool_servers)) if mcp else []
     if memory is not None:
         tool_specs.append(REMEMBER_TOOL_SPEC)  # MCP 도구 옆에 내장 쓰기 도구를 더한다
+    # 스키마는 매 요청마다 통째로 다시 나간다 — 설명을 눌러 담아 고정 비용을 줄인다.
+    tool_specs = slim_tools(tool_specs, settings)
 
     # 도구 라운드 상한: 설정에서 조정할 수 있다 (최소 1로 보정 — 0이면 응답 자체가 불가).
     try:
