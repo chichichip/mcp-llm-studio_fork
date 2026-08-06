@@ -24,14 +24,12 @@ from collections import OrderedDict
 def norm(s):
     """카테고리/품명 **비교 전용** 정규화 키를 만든다.
 
-    엑셀 값에는 오타와 공백 흔들림이 섞여 있다 — 실제로 확인된 것만 해도
-    'CLAMP<,SADDLE'(꺾쇠), 'GASCKET'(철자), 'DESIGNSTANDARD'(공백 누락),
-    'PLUG& CAP'·'WASHER& SEAL RING'(& 앞 공백 없음), 'RING,RETAINING, SPIRAL'.
+    공백을 전부 없앤 키로 비교한다. 카테고리 목록에 공백만으로 구분되는 서로 다른
+    중분류는 없으므로 안전하고, 'PLUG & CAP' / 'PLUG& CAP' 처럼 공백이 흔들려도
+    같은 것으로 본다. 대소문자와 꺾쇠(<>) 같은 입력 잡음도 함께 흡수한다.
 
-    그래서 **공백을 전부 없앤 키**로 비교한다. 목록에 공백만으로 구분되는 서로 다른
-    중분류는 없으므로 안전하고, 위 흔들림이 한 번에 흡수된다. 철자 오타(GASCKET)만은
-    공백 규칙으로 못 잡으니 KNOWN_MIDS 에 양쪽 철자를 같이 적어 둔다.
-
+    ⚠ 철자가 다른 오타(GASKET/GASCKET 류)는 이 규칙으로 못 잡는다. 그런 값이 실제로
+    엑셀에 있으면 KNOWN_MIDS 에 양쪽 철자를 등록해야 한다.
     ⚠ 이 함수의 결과는 **비교에만** 쓴다. 사람에게 보여줄 때는 엑셀에 적힌 원본
     문자열을 그대로 쓴다(출력이 엑셀과 달라 보이면 대조가 안 된다).
     """
@@ -66,7 +64,9 @@ KNOWN_MIDS = [
     "O-RING", "O-RING, METAL", "SEAL",
     "BEARING, SPHERICAL", "BEARING, SLEEVE", "BEARING, ROD END",
     # 배관/구조
-    "NUT, COUPLING", "FERRULE/SLEEVE", "GASKET", "GASCKET",   # GASCKET 은 철자 오타라 양쪽 등록
+    # GASCKET 은 목록을 옮겨 적을 때 난 오타로 확인됐다(엑셀은 GASKET). 실제 엑셀에
+    # 오타가 있으면 validate_catalog 가 보고하므로 그때 여기에 추가하면 된다.
+    "NUT, COUPLING", "FERRULE/SLEEVE", "GASKET",
     "CLAMP, LOOP", "CLAMP, LOOP, CUSHIONED", "CLAMP, LOOP, MULTI TUBE",
     "CLAMP, SADDLE", "CLIP", "BRACKET",
     "ADAPTER", "ELBOW", "TEE", "CROSS", "PLUG & CAP", "WASHER & SEAL RING",
@@ -201,11 +201,31 @@ def _rows_from_csv(path):
         return [r for r in csv.reader(f)]
 
 
+# 이 필드 중 하나라도 값이 있으면 '실제 부품 행'으로 본다. 대분류/중분류만 적힌 행은
+# 계층 표제이지 부품이 아니다.
+LEAF_KEYS = ("drawing", "part", "name")
+
+
 def load_catalog(path, sheet=None, columns=None):
     """엑셀(.xlsx) 또는 CSV 표준품 목록을 읽어 Item 리스트로.
 
-    첫 행을 헤더로 본다. 알아본 컬럼만 담고 나머지는 무시한다.
-    품명에서 직경을 파싱해 'diameter' 로 넣어 둔다(엑셀에 직경 컬럼이 없다).
+    ★ 엑셀이 **계층식**이다. 대분류가 한 행에 적히고, 그 아래 행에 중분류가 적히고,
+    다시 그 아래 행들에 도면번호-부품번호-품명-소재-비고가 온다:
+
+        대분류 | 중분류           | 도면번호 | 부품번호  | 품명                    | ...
+        BOLT   |                  |          |           |                         |
+               | BOLT, DOUBLE HEX |          |           |                         |
+               |                  | AS9555   | MS9555-07 | BOLT, DOUBLE HEX, 0.164 |
+               |                  | AS9555   | MS9555-08 | BOLT, DOUBLE HEX, 0.164 |
+
+    그래서 대분류/중분류를 **아래로 흘려 채우고(forward fill)**, 표제 행은 부품으로
+    세지 않는다. 이걸 안 하면 거의 모든 행의 대분류·중분류가 비어 조회가 전부 실패한다.
+    (병합 셀도 같은 모양으로 읽힌다 — openpyxl 은 좌상단에만 값을 주고 나머지는 None.)
+
+    평평한 표(모든 행에 값이 다 있는 형태)에도 그대로 안전하다. 흘려 채울 것이 없고
+    모든 행이 부품 행이라 아무 일도 일어나지 않는다.
+
+    첫 행을 헤더로 본다. 품명에서 직경을 파싱해 'diameter' 로 넣는다(직경 컬럼이 없다).
     """
     if not os.path.exists(path):
         raise RuntimeError(f"표준품 목록 파일이 없습니다: {path}")
@@ -228,13 +248,31 @@ def load_catalog(path, sheet=None, columns=None):
             f"기대: {list(colmap)} — 다르면 load_catalog(columns={{...}}) 로 알려주세요."
         )
 
+    def cell(row, key):
+        i = idx.get(key)
+        if i is None or i >= len(row) or row[i] is None:
+            return ""
+        return str(row[i]).strip()
+
     items = []
+    carry = {"major": "", "mid": ""}     # 계층에서 아래로 흘려 채울 값
     for r in raw[1:]:
         if not any(c not in (None, "") for c in r):
             continue  # 빈 행
+        for key in ("major", "mid"):
+            v = cell(r, key)
+            if v:
+                carry[key] = v
+                if key == "major":
+                    carry["mid"] = ""   # 대분류가 바뀌면 중분류는 다시 받아야 한다
+        if not any(cell(r, k) for k in LEAF_KEYS):
+            continue  # 대분류/중분류만 적힌 표제 행 — 부품이 아니다
+
         item = Item()
-        for key, i in idx.items():
-            item[key] = str(r[i]).strip() if i < len(r) and r[i] is not None else ""
+        for key in idx:
+            item[key] = cell(r, key)
+        item["major"] = item.get("major") or carry["major"]
+        item["mid"] = item.get("mid") or carry["mid"]
         item["diameter"] = parse_diameter(item.get("name"))
         items.append(item)
     return items

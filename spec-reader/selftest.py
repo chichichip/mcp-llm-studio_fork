@@ -110,7 +110,59 @@ def run_catalog():
     return ok
 
 
+def run_selection():
+    """selection.py — 나사규격 정규화와 dash 선정. VLM/엑셀 불필요."""
+    import selection as S
+    ok = True
+
+    def chk(label, cond):
+        nonlocal ok
+        print(f"  {'OK ' if cond else '★NG'} {label}")
+        if not cond:
+            ok = False
+
+    print("[selection] 나사규격 정규화 (.190 == 10-32)")
+    chk(".1900-32 == 10-32", S.threads_match(".1900-32", "10-32"))
+    chk(".164-36 UNJF-3A == 8-36", S.threads_match(".164-36 UNJF-3A", "8-36"))
+    chk("1/4-28 == .250-28", S.threads_match("1/4-28", ".250-28"))
+    chk("다른 나사는 안 맞음", not S.threads_match(".190-32", ".164-36"))
+    chk("TPI 다르면 안 맞음", not S.threads_match("10-32", "10-24"))
+    chk("못 읽으면 False (추측 금지)", not S.threads_match("이상한값", ".190-32"))
+
+    rows = load("fixtures/MS9555.json")["rows"]
+
+    print("[selection] 무그립 dash 분리")
+    chk("MS9555 무그립 = 02~08", S.no_grip_dashes(rows) == ["02","03","04","05","06","07","08"])
+
+    print("[selection] ★ 나사부 길이는 dash 변별력이 없다 (계열 상수라서)")
+    lens = {S.thread_length_rule(r) for r in rows if r["dash"] not in
+            ("02","03","04","05","06","07","08")}
+    chk("그립 구간 나사부 길이가 전부 같음(0.578)", lens == {0.578})
+    hits, _ = S.select_bolt_dash(rows, 0.578)
+    chk("그래서 조건을 주면 22개가 전부 걸린다", len(hits) == 22)
+
+    print("[selection] 그립(K) 기준은 체결두께로 갈린다 (제안 규칙)")
+    for t, exp in ((0.20, "11"), (0.50, "16"), (1.00, "24")):
+        h, _ = S.select_bolt_dash_by_grip(rows, t)
+        chk(f"체결두께 {t} -> dash {exp}", [d for d, _k in h] == [exp])
+    h, _ = S.select_bolt_dash_by_grip(rows, 3.0)
+    chk("범위 밖이면 없다고 함", h == [])
+
+    print("[selection] 없으면 없다고 하는가")
+    hits, info = S.select_bolt_dash(rows, 9.999)
+    chk("선정 0건", hits == [])
+    chk("가까운 후보는 따로 보고(선정 아님)", len(info["near"]) > 0)
+
+    print("[selection] 너트 — 나사규격 매칭")
+    nut = [{"dash": "1032", "THREAD": ".1900-32"}, {"dash": "428", "THREAD": ".2500-28"}]
+    h, _ = S.select_nut_dash(nut, "10-32")
+    chk("10-32 -> dash 1032", [d for d, _t in h] == ["1032"])
+    h, info = S.select_nut_dash(nut, ".164-36")
+    chk("★ 맞는 너트가 없으면 없다고 함 (MS9555 시나리오)", h == [])
+    print()
+    return ok
+
+
 if __name__ == "__main__":
-    a = run()
-    b = run_catalog()
-    sys.exit(0 if (a and b) else 1)
+    results = [run(), run_catalog(), run_selection()]
+    sys.exit(0 if all(results) else 1)
