@@ -159,6 +159,7 @@ CRES 는 300계열(~800°F)일 수도 A286(1200°F)일 수도 있다.
 ```
 spec-reader/
 ├── read_spec.py      메인 CLI
+├── catalog.py        엑셀 표준품 목록 조회 + 볼트↔너트 매핑 (VLM 불필요)
 ├── verify.py         검증 로직 (VLM 불필요)
 ├── merge.py          다중 페이지 병합
 ├── prompts.py        프롬프트 (판독 안 맞으면 여기만 수정)
@@ -191,6 +192,8 @@ python selftest.py
 - ✅ MS9555 판독 성공 (좌우 그룹 병합 포함)
 - ✅ AS3477 판독 성공 (`PART NUMBER` 식별 컬럼 대응 후)
 - ✅ `selftest.py` — 정답 통과 + 오독 4종(숫자변조/행누락/null/중복) 전부 검출
+- ✅ `catalog.py` — 정규화/매핑/직경파싱/조회/미등록 보고, CSV 로 회귀 테스트 (엑셀 불필요)
+- ⬜ 실제 엑셀 파일로 `load_catalog` 미검증 (헤더 이름·시트 구성 확인 필요)
 - ⬜ `meta` 명령 미검증 — **다음 세션 첫 작업**
 - ⬜ 너트 스펙(MS20500 등) 판독 미검증
 - ⬜ 컬럼 분할 병합(AS4395) 실제 PDF 미검증
@@ -211,16 +214,30 @@ MS9555 는 `.164-36 UNJF-3A`, MS9556 은 `.190-32UNJF-3A` 가 나와야 한다.
 볼트 직경과 매칭하는 방법. 스펙을 한 번만 읽으면 되어 더 안전하다.
 `.190` 과 `10-32` 가 같다는 정규화만 필요.
 
-### 7.2 엑셀 연동 모듈 (`catalog.py`)
+### 7.2 엑셀 연동 모듈 (`catalog.py`) — ✅ 구현됨
 
 ```python
-find_series(대분류, 중분류, 직경) -> [도면번호, ...]
-get_spec_path(품명) -> 파일 경로
-nut_category_of(볼트_중분류) -> 너트_중분류
+load_catalog(경로)                     # .xlsx(openpyxl) 또는 .csv
+find_series(items, 대분류, 중분류, 직경) -> [(도면번호, 품명, 직경, 행수), ...]
+get_spec_path(item, 스펙폴더)           -> 파일 경로 (품명→도면번호 순으로 시도)
+nut_categories_for(볼트_중분류)         -> ([너트 중분류 후보], 안내문)
+validate_catalog(items)                -> 모르는 중분류 등 알림
 ```
 
-**확인 필요**: 중분류 매핑이 단순 문자열 치환(`BOLT`→`NUT`)으로 되는지,
-아니면 매핑표를 손으로 써야 하는지. 실제 중분류 값 목록을 봐야 판단 가능.
+**확인 완료 — 단순 치환은 불가능하다.** 실제 중분류 목록을 받아 대조한 결과:
+
+- `BOLT, DOUBLE HEX` 의 짝은 `NUT, DOUBLE HEX` 가 아니다. **그 중분류는 없다.**
+  실제 짝은 `NUT, SELF-LOCKING, DOUBLE HEX` 하나뿐.
+- `BOLT, HEX` 는 `NUT, PLAIN, HEX` / `NUT, SELF-LOCKING, HEX` **둘 다** 후보 →
+  셀프락킹 여부는 설계 요구사항이므로 **되물어야 한다**. 자동 선택 금지.
+- `BOLT, T-HEAD` 의 짝은 미확인 → 추정하지 않고 그대로 보고한다.
+
+→ 손으로 쓴 매핑표(`NUT_FOR_BOLT`)를 쓴다. 새 볼트 중분류는 여기에 추가.
+
+**중분류 이름은 유일하지 않다.** `NUT` 은 대분류 NUT 밑에도 FITTING 밑에도 있고
+`NUT, COUPLING` 은 TUBING 소속이다 → 조회는 반드시 (대분류, 중분류) 쌍으로.
+
+**직경은 별도 컬럼이 아니라 품명 끝에 있다** (`BOLT, DOUBLE HEX, 0.164`).
 
 ### 7.3 선정 로직 (`select.py`)
 
