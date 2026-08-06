@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 두 층으로 이루어져 있고, **둘의 성격이 완전히 다르다**.
 
-1. **반입물 (repo가 추적하는 것)** — `mcp_server/`의 MCP 서버들과 그 실행용 `run_*.bat`, `llm_studio/`(앱 + `serve_llm.py`), RAG 학습 문서 투입 폴더 `rag_docs/`, 루트의 `install_requirements.bat`. 사내 폐쇄망에서 실제로 돌릴 코드다. 여기가 이 저장소의 본체다. (폴더 규약: 서버 코드와 실행 bat은 `mcp_server/`에, LLM 서빙은 `llm_studio/`에, 오프라인 설치와 공용 `venv/`만 루트에 둔다.)
+1. **반입물 (repo가 추적하는 것)** — `mcp_server/`의 MCP 서버들과 그 실행용 `run_*.bat`, `llm_studio/`(앱 + `serve_llm.py`), RAG 학습 문서 투입 폴더 `rag_docs/`, 표준품 스펙 판독 모듈 `spec-reader/`, 루트의 `install_requirements.bat`. 사내 폐쇄망에서 실제로 돌릴 코드다. 여기가 이 저장소의 본체다. (폴더 규약: 서버 코드와 실행 bat은 `mcp_server/`에, LLM 서빙은 `llm_studio/`에, 오프라인 설치와 공용 `venv/`만 루트에 둔다.)
 2. **강의 자료 (`Examples/`, `.gitignore`로 제외됨)** — LangChain/LangGraph 한국어 코스("AITF")의 랩 노트북과 봇 하니스. **git에 올라가지 않으므로 clone한 곳에는 존재하지 않는다.** 개발 PC에만 있는 참고 자료이고, 루트 코드가 여기에 의존하지 않는다.
 
 `Examples/`를 수정하는 작업은 커밋되지 않는다는 점을 항상 염두에 둘 것.
@@ -140,6 +140,22 @@ FastAPI 서버 + 브라우저 채팅 UI + llama-server 프로세스 관리를 �
 - **위험 도구 승인 게이트** (`server/approvals.py`) — 모델이 `confirm=true` 인자로 도구를 부르거나 config `approval_tools`에 오른 도구를 부르면, 실행 전에 SSE `approval_request` 이벤트로 브라우저에 승인/거절 버튼을 띄우고 `POST /api/chat/approve` 응답을 기다린다(시간 초과·거절이면 실행하지 않고 그 사실을 도구 결과로 모델에 알림). 상태는 전부 RAM(asyncio Future) — 저장 위치 원칙과 무관. **MCP 서버 쪽 confirm 게이트와 이중 안전장치**로, 모델이 사용자에게 묻지 않고 스스로 confirm=true를 넣는 사고를 막는다. `approval_enabled`로 켜고 끈다(기본 켬).
 - llama-server는 `--jinja`로 실행돼 Gemma의 chat template 기반 함수 호출을 쓴다. Gemma는 공식 tool-use 학습이 약한 편이라 도구 호출 정확도가 모델에 따라 갈린다.
 - 외부 LLM 프리셋(OpenAI/Anthropic/Gemini)은 폐쇄망에선 쓸 수 없다. 그 자리에 **사내 프록시/게이트웨이 주소를 등록하는 용도**로 남겨둔 것이다.
+
+### `spec-reader/` — 항공 표준품 스펙 판독 모듈 (별도 프로젝트에서 합류)
+
+항공 가스터빈 체결용 표준품(볼트/너트/워셔) **선정 에이전트**의 1단계. 스펙 PDF의 치수표를 Gemma VLM(사내 호스팅, OpenAI 호환 `/v1/chat/completions`)으로 판독하고 **결정론적 규칙으로 자동 검증**한다. 원래 독립 저장소였고 커밋 5개 분량의 이력은 원본 zip에 있다(여기엔 파일만 합쳤다).
+
+**이 폴더는 아직 MCP 서버가 아니다** — CLI(`read_spec.py`)다. 에이전트 도구로 만드는 게 다음 작업이고, 그때 `mcp_server/` 규약(3티어·우아한 저하·stdio stdout 금지)을 따라 감싸면 된다.
+
+핵심 원칙 (항공 부품이라 타협 불가 — `spec-reader/CLAUDE.md`·`HANDOFF.md`에 상세):
+- **VLM은 판독만, 선정 판단은 결정론적 함수로.** LLM이 부품을 "고르면" 환각이 곧 비행 안전 문제가 된다.
+- **판독값은 자동 검증 통과 후에만 쓴다.** 검증 규칙은 데이터에서 찾은 불변식이다 — `L − K_max`가 계열 상수(MS9555=0.578, MS9556=0.630), `L`이 1/16″ 격자 위, dash 중복·누락 없음. 새 표준을 추가할 땐 **그 계열의 불변식을 먼저 찾을 것.**
+- **모르면 모른다고 출력.** "MS9555에 맞는 너트가 없다"를 잡아낸 것이 이 시스템의 가치였다.
+- **출력은 짧게.** 사내망에서 파일 반출이 안 돼 사람이 눈으로 보고 구두로 옮긴다.
+
+구조: `read_spec.py`(CLI: preview/read/meta) · `verify.py`(검증 — VLM 없이 동작해 외부망에서 개발 가능) · `merge.py`(다중 페이지 병합 — 행 분할/컬럼 분할 둘 다) · `prompts.py`(판독이 안 맞으면 여기만 고친다) · `selftest.py`(fixture 회귀 — 오독 4종 주입 검출) · `fixtures/MS9555.json`(공개 표준 정답 29행).
+
+⚠ 제약이 이 저장소와 다르다: 사내 PC **파이썬 3.10**(Pillow는 10.4.0 — 11부터 3.10 미지원), VLM 요청 크기 제한으로 300 DPI 전체 페이지는 413 → `--dpi 150` 또는 `--crop` 필요. `config.py`(사내 URL/모델명)는 `.gitignore`에 있고 `config.example.py`를 복사해 채운다.
 
 ### `Examples/` — 강의 자료 (추적 안 됨)
 

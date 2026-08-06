@@ -1,0 +1,18 @@
+# 사내 설정 - 절대 커밋 금지
+config.py
+
+# 기밀 스펙
+specs/
+*.pdf
+!samples/*.pdf
+
+# 판독 결과물
+out/
+*.png
+!docs/*.png
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
