@@ -63,6 +63,16 @@ try:
 except ImportError:
     pythoncom = None  # type: ignore[assignment]
 
+# PDF를 페이지 이미지로 렌더링해 VLM에 전사시키는 경로(Vision RAG). PyMuPDF/Pillow/VLM이
+# 없어도 이 모듈 자체는 import되고 안에서 저하한다 — 여기서 실패하면 PDF만 못 넣는다.
+try:
+    import vision_ingest
+
+    VISION_IMPORT_ERROR = ""
+except Exception as e:  # noqa: BLE001
+    vision_ingest = None  # type: ignore[assignment]
+    VISION_IMPORT_ERROR = str(e)
+
 try:
     import numpy as _np  # 선택 의존성 — 없으면 순수 파이썬 코사인으로 저하
 except ImportError:
@@ -98,7 +108,17 @@ CHUNK_SIZE = 1000      # 청크 목표 길이(문자)
 CHUNK_OVERLAP = 200    # 청크 사이 겹침(문자)
 EMBED_BATCH = 16       # 임베딩 요청 한 번에 보낼 청크 수
 EMBED_TIMEOUT = 120    # 임베딩 요청 타임아웃(초) — CPU 서빙이면 배치가 느릴 수 있다
-DOC_PATTERNS = (".docx", ".doc")  # 인덱싱 대상 확장자
+
+# 인덱싱 대상 확장자 → 읽는 경로(kind). 확장자마다 본문을 얻는 방법이 다르다:
+#   word  = Word COM (DRM 문서도 읽힘)
+#   pdf   = vision_ingest (페이지 이미지 → VLM 전사, 실패 시 텍스트 레이어)
+#   excel = Excel COM (시트를 탭 구분 텍스트로)
+DOC_KINDS = {
+    ".docx": "word", ".doc": "word",
+    ".pdf": "pdf",
+    ".xlsx": "excel", ".xlsm": "excel", ".xls": "excel",
+}
+DOC_PATTERNS = tuple(DOC_KINDS)  # 하위 호환 (예전 코드가 확장자 튜플로 참조)
 MAX_RESULT_CHARS = 1200           # 검색 결과에서 청크 하나당 보여줄 최대 길이
 RRF_K = 60                        # RRF 상수 (관례값)
 
@@ -179,6 +199,61 @@ def _extract_word_text(path: str, password: str = "") -> str:
     with _document("word", path, password) as doc:
         raw = doc.Content.Text
     return _clean_word_text(raw or "")
+
+
+# ─────────────────────────────── 문서 읽기 (Excel COM) ───────────────────────────────
+# 표준품 목록 같은 표 엑셀용. 시트를 탭 구분 텍스트로 옮겨 청킹 대상 텍스트로 만든다.
+# ⚠ 이건 **검색용 근사**다 — 부품번호 정확 조회는 spec-reader/catalog.py가 엑셀을 직접
+# 읽어서 한다(RAG는 청크 경계에서 행이 잘릴 수 있어 '정확히 이 부품이 있나'에 못 쓴다).
+
+EXCEL_MAX_ROWS = int(os.getenv("RAG_EXCEL_MAX_ROWS", "20000"))  # 시트당 상한(폭주 방지)
+
+
+def _fmt_cell(v) -> str:
+    """엑셀 셀 값 하나를 문자열로. 부품번호가 '1.0' 처럼 변형되지 않게 정수는 정수로."""
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "TRUE" if v else "FALSE"
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v).strip()
+
+
+def _extract_excel_text(path: str, password: str = "") -> str:
+    """워크북의 모든 시트를 '시트명 › 행' 텍스트로 뽑는다.
+
+    한 행이 한 줄(셀은 탭 구분) — Word 표 처리와 같은 방침이라 청킹이 행을 흩지 않는다.
+    빈 행은 건너뛰고, 계층식(대분류/중분류가 첫 행에만 적힌) 표를 위해 **앞선 값이
+    비어 있으면 그대로 둔다** — 채워 넣는 건 catalog.py의 몫이고 여기서 추정하지 않는다.
+    """
+    _require_word()  # Office COM 자체가 있어야 하는 건 Word와 같다
+    lines: list[str] = []
+    with _document("excel", path, password) as wb:
+        for ws in wb.Worksheets:
+            try:
+                used = ws.UsedRange
+                values = used.Value2
+            except Exception:  # noqa: BLE001 — 보호된/빈 시트는 건너뛴다
+                continue
+            if values is None:
+                continue
+            # 단일 셀이면 COM이 스칼라를 준다 — 2차원으로 맞춘다.
+            if not isinstance(values, (tuple, list)):
+                values = ((values,),)
+            elif values and not isinstance(values[0], (tuple, list)):
+                values = (tuple(values),)
+            name = _fmt_cell(ws.Name) or "Sheet"
+            lines.append(f"[시트] {name}")
+            for i, row in enumerate(values):
+                if i >= EXCEL_MAX_ROWS:
+                    lines.append(f"… ({name} 시트는 {EXCEL_MAX_ROWS}행까지만 인덱싱)")
+                    break
+                cells = [_fmt_cell(c) for c in row]
+                if not any(cells):
+                    continue
+                lines.append("\t".join(cells).rstrip("\t"))
+    return _nfc("\n".join(lines))
 
 
 # ─────────────────────────────── 청킹 ───────────────────────────────
@@ -287,6 +362,67 @@ def _chunk_text(
             buf = (buf + "\n" + p) if buf else p
     flush()
     return chunks
+
+
+# ─────────────────────────────── 청크 레코드 ───────────────────────────────
+# 청크는 dict 하나로 표현한다: {heading, content, page, image}.
+#   page  — 페이지 기반 원본(PDF)에서 이 청크가 나온 쪽 번호. 0이면 쪽 개념 없음.
+#   image — 그 쪽의 렌더 이미지 경로(vision_ingest 캐시). 검색 결과가 원본 그림으로
+#           되짚어 갈 수 있게 하는 고리다(ask_page 도구).
+# ⚠ replace_file은 옛 (heading, content) 튜플도 받는다 — 호출부를 한 번에 못 바꿔도
+#   깨지지 않게 하기 위한 하위 호환이다.
+
+
+def _as_record(c) -> dict:
+    """(heading, content) 튜플 또는 dict를 청크 레코드 dict로 정규화한다."""
+    if isinstance(c, dict):
+        return {
+            "heading": c.get("heading") or "",
+            "content": c.get("content") or "",
+            "page": int(c.get("page") or 0),
+            "image": c.get("image") or "",
+        }
+    heading, content = c
+    return {"heading": heading or "", "content": content or "", "page": 0, "image": ""}
+
+
+def chunk_document(text: str) -> list[dict]:
+    """통짜 텍스트(Word/Excel)를 청크 레코드 목록으로 만든다."""
+    return [_as_record(t) for t in _chunk_text(text)]
+
+
+_PAGE_TITLE = re.compile(r"^#\s*(\S.*)$")
+
+
+def chunk_pages(pages: list[dict]) -> list[dict]:
+    """페이지 목록(vision_ingest.extract_pdf_pages의 결과)을 청크 레코드로 만든다.
+
+    페이지 경계를 청크 경계로 삼는다 — 쪽 번호와 이미지가 청크마다 정확히 하나로
+    대응해야 검색 결과에서 '몇 쪽을 보라'고 말할 수 있기 때문이다. 한 쪽이 목표 길이를
+    넘으면 그 쪽 안에서만 나눠 담고 page/image는 그대로 물려준다.
+
+    전사 첫 줄이 `# 제목` 이면(PAGE_PROMPT가 그렇게 요구한다) 섹션 경로로 쓴다.
+    """
+    out: list[dict] = []
+    for p in pages:
+        text = _nfc(p.get("text") or "")
+        if not text:
+            continue
+        pno = int(p.get("page") or 0)
+        image = p.get("image") or ""
+        first, _, rest = text.partition("\n")
+        m = _PAGE_TITLE.match(first.strip())
+        if m:
+            heading = m.group(1).strip()[:_HEADING_MAX_LEN * 2]
+            body = rest.strip() or text
+        else:
+            heading, body = "", text
+        label = f"p{pno}" if pno else ""
+        path_label = f"{heading} ({label})" if (heading and label) else (heading or label)
+        for _h, piece in _chunk_text(body):
+            # 쪽 안에서 나뉜 조각들도 같은 쪽 라벨을 쓴다(_h는 쪽 안 소제목이라 버린다).
+            out.append({"heading": path_label, "content": piece, "page": pno, "image": image})
+    return out
 
 
 def _merge_overlapping(texts: list[str], max_overlap: int = CHUNK_OVERLAP) -> str:
@@ -539,7 +675,8 @@ class RagStore:
                     id INTEGER PRIMARY KEY,
                     path TEXT NOT NULL UNIQUE,
                     mtime REAL, size INTEGER,
-                    indexed_at REAL, chunk_count INTEGER
+                    indexed_at REAL, chunk_count INTEGER,
+                    kind TEXT, source TEXT
                 );
                 CREATE TABLE IF NOT EXISTS chunks (
                     id INTEGER PRIMARY KEY,
@@ -547,16 +684,24 @@ class RagStore:
                     seq INTEGER NOT NULL,
                     content TEXT NOT NULL,
                     heading TEXT,
-                    embedding BLOB
+                    embedding BLOB,
+                    page INTEGER DEFAULT 0,
+                    image TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_id);
                 """
             )
-            # 기존 DB 마이그레이션: heading 컬럼이 없으면 추가한다(CREATE는 이미 있는
-            # 테이블을 건드리지 않으므로). 재인덱싱 전 기존 청크의 heading은 NULL로 남는다.
+            # 기존 DB 마이그레이션: CREATE TABLE은 이미 있는 테이블을 건드리지 않으므로
+            # 새 컬럼은 ALTER로 붙인다. 기존 청크는 값이 NULL로 남고, 재인덱싱하면 채워진다.
             cols = {r[1] for r in self.conn.execute("PRAGMA table_info(chunks)")}
-            if "heading" not in cols:
-                self.conn.execute("ALTER TABLE chunks ADD COLUMN heading TEXT")
+            for name, ddl in (("heading", "TEXT"), ("page", "INTEGER DEFAULT 0"),
+                              ("image", "TEXT")):
+                if name not in cols:
+                    self.conn.execute(f"ALTER TABLE chunks ADD COLUMN {name} {ddl}")
+            fcols = {r[1] for r in self.conn.execute("PRAGMA table_info(files)")}
+            for name in ("kind", "source"):
+                if name not in fcols:
+                    self.conn.execute(f"ALTER TABLE files ADD COLUMN {name} TEXT")
             try:
                 self.conn.execute(
                     "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts "
@@ -589,12 +734,15 @@ class RagStore:
         return bool(row) and abs(row["mtime"] - mtime) < 1e-6 and row["size"] == size
 
     def replace_file(self, path: str, mtime: float, size: int,
-                     chunks: list[tuple[str, str]], vectors: list[list[float]] | None) -> int:
+                     chunks: list, vectors: list[list[float]] | None,
+                     kind: str = "", source: str = "") -> int:
         """파일 하나의 청크들을 통째로 교체한다(기존 것 삭제 후 삽입).
 
-        chunks는 (섹션경로, 본문) 튜플 목록이다. 벡터는 백엔드에 따라 Qdrant(청크
-        id를 포인트 id로) 또는 sqlite BLOB에 둔다.
+        chunks는 청크 레코드 dict 목록이다({heading, content, page, image}). 옛
+        (섹션경로, 본문) 튜플도 받는다(_as_record가 흡수). 벡터는 백엔드에 따라
+        Qdrant(청크 id를 포인트 id로) 또는 sqlite BLOB에 둔다.
         """
+        records = [_as_record(c) for c in chunks]
         use_qdrant = self.vec is not None
         new_ids: list[int] = []
         with self._lock:
@@ -610,19 +758,20 @@ class RagStore:
                 self.conn.execute("DELETE FROM chunks WHERE file_id = ?", (old["id"],))
                 self.conn.execute("DELETE FROM files WHERE id = ?", (old["id"],))
             cur = self.conn.execute(
-                "INSERT INTO files(path, mtime, size, indexed_at, chunk_count) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (path, mtime, size, time.time(), len(chunks)),
+                "INSERT INTO files(path, mtime, size, indexed_at, chunk_count, kind, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (path, mtime, size, time.time(), len(records), kind or None, source or None),
             )
             fid = cur.lastrowid
-            for i, (heading, content) in enumerate(chunks):
+            for i, rec in enumerate(records):
                 blob = None
                 if not use_qdrant and vectors and i < len(vectors):
                     blob = _pack_vec(vectors[i])
                 c = self.conn.execute(
-                    "INSERT INTO chunks(file_id, seq, content, heading, embedding) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (fid, i + 1, content, heading or None, blob),
+                    "INSERT INTO chunks(file_id, seq, content, heading, embedding, page, image) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (fid, i + 1, rec["content"], rec["heading"] or None, blob,
+                     rec["page"], rec["image"] or None),
                 )
                 new_ids.append(int(c.lastrowid))
             self.conn.commit()
@@ -631,7 +780,7 @@ class RagStore:
             self.vec.delete(old_chunk_ids)
             if vectors:
                 self.vec.upsert(new_ids, vectors)
-        return len(chunks)
+        return len(records)
 
     def remove_missing(self, existing_paths: set[str]) -> int:
         """디스크에서 사라진 파일의 인덱스를 정리한다. 반환: 삭제한 파일 수."""
@@ -692,8 +841,43 @@ class RagStore:
     def list_files(self, limit: int = 200) -> list[dict]:
         with self._lock:
             rows = self.conn.execute(
-                "SELECT path, chunk_count, indexed_at FROM files ORDER BY path LIMIT ?",
+                "SELECT path, chunk_count, indexed_at, kind, source FROM files "
+                "ORDER BY path LIMIT ?",
                 (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def find_file(self, needle: str) -> list[dict]:
+        """경로/파일명 조각으로 인덱싱된 파일을 찾는다(ask_page 등이 쓰는 느슨한 조회).
+
+        정확한 절대경로를 먼저 보고, 없으면 파일명에 조각이 들어가는 것을 모은다.
+        여럿이면 그대로 돌려준다 — 호출부가 '어느 걸 말하는지' 되묻게 하기 위해서다.
+        """
+        n = _nfc(needle)
+        if not n:
+            return []
+        with self._lock:
+            exact = self.conn.execute(
+                "SELECT path, kind, source, chunk_count FROM files WHERE path = ?",
+                (os.path.abspath(os.path.expanduser(n)),),
+            ).fetchall()
+            if exact:
+                return [dict(r) for r in exact]
+            rows = self.conn.execute(
+                "SELECT path, kind, source, chunk_count FROM files "
+                "WHERE path LIKE ? ORDER BY path LIMIT 20",
+                (f"%{n}%",),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def page_chunks(self, path: str, page: int) -> list[dict]:
+        """한 파일의 특정 쪽에 속한 청크들을 seq 순으로 (전사 원문 되읽기용)."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT c.seq, c.content, c.heading, c.image FROM chunks c "
+                "JOIN files f ON f.id = c.file_id WHERE f.path = ? AND c.page = ? "
+                "ORDER BY c.seq",
+                (path, int(page)),
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -785,7 +969,8 @@ class RagStore:
         qmarks = ",".join("?" * len(chunk_ids))
         with self._lock:
             rows = self.conn.execute(
-                f"SELECT c.id, c.seq, c.content, c.heading, c.file_id, f.path FROM chunks c "
+                f"SELECT c.id, c.seq, c.content, c.heading, c.page, c.image, "
+                f"c.file_id, f.path FROM chunks c "
                 f"JOIN files f ON f.id = c.file_id WHERE c.id IN ({qmarks})",
                 chunk_ids,
             ).fetchall()
@@ -797,7 +982,7 @@ class RagStore:
             return []
         with self._lock:
             rows = self.conn.execute(
-                "SELECT seq, content, heading FROM chunks "
+                "SELECT seq, content, heading, page FROM chunks "
                 "WHERE file_id = ? AND seq BETWEEN ? AND ? ORDER BY seq",
                 (file_id, seq - window, seq + window),
             ).fetchall()
@@ -819,6 +1004,41 @@ def get_store() -> RagStore:
 # ─────────────────────────────── 상태 요약 (양쪽 공용) ───────────────────────────────
 
 
+def doc_kind(path: str) -> str:
+    """확장자로 읽는 경로를 정한다. 대상이 아니면 빈 문자열."""
+    return DOC_KINDS.get(os.path.splitext(path)[1].lower(), "")
+
+
+def extract_chunks(path: str, password: str = "",
+                   use_vlm: bool | None = None) -> tuple[list[dict], str, list[str]]:
+    """파일 하나에서 청크 레코드를 뽑는다. 반환: (청크들, 사용한 경로, 알림들).
+
+    확장자에 따라 Word COM / Excel COM / Vision(PDF)로 갈린다. 어느 쪽이든 결과는
+    같은 모양의 청크 레코드라, 아래 인덱싱·검색은 원본 종류를 몰라도 된다.
+    """
+    kind = doc_kind(path)
+    if kind == "word":
+        return chunk_document(_extract_word_text(path, password)), "word", []
+    if kind == "excel":
+        return chunk_document(_extract_excel_text(path, password)), "excel", []
+    if kind == "pdf":
+        if vision_ingest is None:
+            raise RagError(
+                f"PDF를 읽을 수 없습니다: vision_ingest를 불러오지 못했습니다({VISION_IMPORT_ERROR})."
+            )
+        pages, notes = vision_ingest.extract_pdf_pages(path, use_vlm=use_vlm)
+        if not pages:
+            raise RagError("PDF에서 본문을 얻지 못했습니다: " + ("; ".join(notes) or "사유 불명"))
+        # 한 페이지라도 VLM 전사가 있으면 vision, 전부 텍스트면 그 백엔드 이름을 남긴다.
+        sources = {p.get("source") or "text" for p in pages}
+        source = "vision" if "vlm" in sources else "/".join(sorted(sources))
+        return chunk_pages(pages), source, notes
+    raise RagError(
+        f"인덱싱 대상이 아닌 확장자입니다: {os.path.basename(path)} "
+        f"(지원: {', '.join(sorted(DOC_KINDS))})"
+    )
+
+
 def status_text() -> str:
     """인덱스 상태 요약 — rag_server의 rag_status 도구와 rag_indexer --status가 공용."""
     store = get_store()
@@ -838,13 +1058,18 @@ def status_text() -> str:
             + (f" — {store.vec_error}" if store.vec_error else "")
             + ("" if _np is not None else " (numpy 없음 — 순수 파이썬 코사인, 사내 미러에 있으면 설치 권장)")
         ),
-        f"Word 읽기(COM): {'가능' if (COM_AVAILABLE and _document is not None) else '불가 — ' + (OFFICE_IMPORT_ERROR or 'pywin32 없음')}",
+        f"Word/Excel 읽기(COM): {'가능' if (COM_AVAILABLE and _document is not None) else '불가 — ' + (OFFICE_IMPORT_ERROR or 'pywin32 없음')}",
     ]
+    if vision_ingest is not None:
+        lines.append(vision_ingest.status_text())
+    else:
+        lines.append(f"PDF(Vision) 인제스트: 불가 — {VISION_IMPORT_ERROR}")
     if s["files"]:
         lines.append("")
         lines.append("인덱싱된 파일(최대 20개):")
         for f in store.list_files(limit=20):
-            lines.append(f"  - {os.path.basename(f['path'])} (청크 {f['chunk_count']}개)")
+            tag = f" [{f['source']}]" if f.get("source") else ""
+            lines.append(f"  - {os.path.basename(f['path'])} (청크 {f['chunk_count']}개){tag}")
     else:
         lines.append("")
         lines.append("인덱스가 비어 있습니다 — rag_indexer.py(run_rag_indexer.bat)로 문서 폴더를 인덱싱하세요.")

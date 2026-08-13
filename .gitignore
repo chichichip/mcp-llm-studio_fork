@@ -35,6 +35,8 @@ Thumbs.db
 # RAG 인덱스 산출물 (rag_server.py가 생성 — 재인덱싱으로 언제든 복구 가능)
 rag_index.db
 rag_vectors/
+# Vision RAG 페이지 이미지 캐시 (vision_ingest.py가 생성 — 용량이 크고 재생성 가능)
+rag_pages/
 
 # RAG 학습에 투입하는 실제 문서 (사내 문서일 수 있어 공개 repo에 넣지 않는다).
 # README만 남기고 나머지 전부 제외.

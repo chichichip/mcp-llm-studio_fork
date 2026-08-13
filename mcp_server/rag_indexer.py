@@ -1,6 +1,8 @@
 r"""rag_indexer.py
 
 RAG 인덱스 **구성** CLI — 서빙(rag_server.py, MCP)과 의도적으로 분리돼 있다.
+Word/Excel은 COM으로, **PDF는 페이지 이미지 → VLM 전사(Vision RAG)**로 읽는다
+(vision_ingest.py). 어느 경로든 결과는 같은 모양의 청크라 검색은 원본 종류를 모른다.
 폴더/파일 인덱싱(🟡: 원본 문서는 읽기만 하고 인덱스 파일에만 씀)과
 인덱스 삭제(🔴: --clear는 --yes 없이는 프리뷰만)를 담당한다.
 
@@ -11,17 +13,20 @@ RAG 인덱스 **구성** CLI — 서빙(rag_server.py, MCP)과 의도적으로 �
        rag_server(MCP)를 내리고 실행할 것.
     2. 서빙 MCP는 읽기 전용(🟢)만 노출돼 모델이 인덱스를 건드릴 수 없다.
 
-사용 (루트의 run_rag_indexer.bat 이 이 스크립트를 부른다):
+사용 (mcp_server의 run_rag_indexer.bat 이 이 스크립트를 부른다):
     python rag_indexer.py C:\docs               # 폴더 인덱싱 (증분 — 변경된 파일만)
     python rag_indexer.py C:\docs --reindex     # 전부 다시 (임베딩 포함)
-    python rag_indexer.py --file C:\docs\a.docx # 파일 하나만 다시
+    python rag_indexer.py --file C:\docs\a.pdf  # 파일 하나만 다시
+    python rag_indexer.py C:\specs --vlm-url http://<사내VLM>/v1 --vlm-model gemma-3-27b
+    python rag_indexer.py C:\docs --no-vlm      # PDF도 텍스트 레이어만 (VLM 없이 뼈대부터)
     python rag_indexer.py --status              # 인덱스 상태 확인
     python rag_indexer.py --clear               # 삭제 프리뷰 (실행 안 함)
     python rag_indexer.py --clear --yes         # 인덱스 전체 삭제
 
-Word COM을 쓰므로 office_server와 같은 제약: Windows + Office, 사용자가 로그인한
-세션에서 실행. 임베딩 서버(llama-server --embeddings)가 꺼져 있으면 키워드 인덱스만
-만들고, 나중에 서버를 켜고 --reindex 하면 벡터가 붙는다.
+Word/Excel은 COM을 쓰므로 office_server와 같은 제약: Windows + Office, 사용자가
+로그인한 세션에서 실행(PDF만 넣을 때는 필요 없다). 임베딩 서버(llama-server
+--embeddings)나 VLM 서버가 꺼져 있으면 각각 우아하게 저하하고, 나중에 서버를 켜고
+--reindex 하면 벡터와 전사가 붙는다.
 """
 
 from __future__ import annotations
@@ -39,11 +44,11 @@ from rag_core import DOC_PATTERNS, EMBED_BATCH, OfficeError, RagError, RagStore
 
 
 def _iter_doc_files(folder: str) -> list[str]:
-    """폴더(재귀)에서 인덱싱 대상 Word 파일 목록. Office 임시 파일(~$)은 제외."""
+    """폴더(재귀)에서 인덱싱 대상 파일 목록(.docx/.doc/.pdf/.xlsx…). 임시 파일(~$)은 제외."""
     found = []
     for root, _dirs, names in os.walk(folder):
         for name in names:
-            if name.startswith("~$"):
+            if name.startswith("~$") or name.startswith("."):
                 continue
             if os.path.splitext(name)[1].lower() in DOC_PATTERNS:
                 found.append(os.path.abspath(os.path.join(root, name)))
@@ -51,20 +56,21 @@ def _iter_doc_files(folder: str) -> list[str]:
 
 
 def _index_one_file(store: RagStore, path: str, password: str = "",
-                    reindex: bool = False, use_embed: bool | None = None) -> str:
+                    reindex: bool = False, use_embed: bool | None = None,
+                    use_vlm: bool | None = None) -> str:
     """파일 하나를 인덱싱한다. 반환: 한 줄 결과 요약."""
     st = os.stat(path)
     if not reindex and store.file_unchanged(path, st.st_mtime, st.st_size):
         return "변경 없음 — 건너뜀"
-    text = core._extract_word_text(path, password)
-    chunks = core._chunk_text(text)  # [(섹션경로, 본문), ...]
+    kind = core.doc_kind(path)
+    chunks, source, notes = core.extract_chunks(path, password, use_vlm=use_vlm)
     if not chunks:
-        store.replace_file(path, st.st_mtime, st.st_size, [], None)
+        store.replace_file(path, st.st_mtime, st.st_size, [], None, kind, source)
         return "본문 없음 — 청크 0개"
     # 임베딩에는 섹션 경로를 제목(title)으로 붙여, 하위 청크에도 상위 제목 맥락이 벡터에
     # 담기게 한다(본문엔 그 섹션 제목 줄만 있고 상위 대제목은 없을 수 있으므로).
     # EmbeddingGemma 등은 문서 프롬프트 포맷이 정해져 있어 core 헬퍼로 생성한다.
-    embed_texts = [core._embed_doc_text(c, h) for h, c in chunks]
+    embed_texts = [core._embed_doc_text(c["content"], c["heading"]) for c in chunks]
     vectors: list[list[float]] | None = None
     if use_embed is not False:
         vectors = []
@@ -74,33 +80,48 @@ def _index_one_file(store: RagStore, path: str, password: str = "",
                 vectors = None  # 서버 죽음/오류 → 이 파일은 키워드 전용으로 저장
                 break
             vectors.extend(batch)
-    store.replace_file(path, st.st_mtime, st.st_size, chunks, vectors)
+    store.replace_file(path, st.st_mtime, st.st_size, chunks, vectors, kind, source)
     vec_note = f"벡터 {len(vectors)}개" if vectors else "벡터 없음(키워드 전용)"
-    return f"청크 {len(chunks)}개, {vec_note}"
+    pages = {c["page"] for c in chunks if c["page"]}
+    page_note = f", {len(pages)}쪽" if pages else ""
+    note = f"[{source}] 청크 {len(chunks)}개{page_note}, {vec_note}"
+    if notes:
+        note += f" (알림 {len(notes)}건: {notes[0][:60]})"
+    return note
 
 
-def index_folder(folder: str, reindex: bool = False, prune: bool = True, password: str = "") -> str:
-    """폴더(하위 포함)의 Word 문서를 모두 인덱싱하고 결과 요약을 돌려준다.
+def index_folder(folder: str, reindex: bool = False, prune: bool = True,
+                 password: str = "", use_vlm: bool | None = None) -> str:
+    """폴더(하위 포함)의 문서를 모두 인덱싱하고 결과 요약을 돌려준다.
 
-    원본 문서는 읽기만 하고 인덱스 파일에만 쓴다. 수정 시각·크기가 같은 파일은
-    건너뛴다(증분). prune=True면 폴더에서 사라진 파일을 인덱스에서도 정리한다.
+    Word/Excel은 COM으로, PDF는 페이지 이미지 → VLM 전사로 읽는다. 원본 문서는 읽기만
+    하고 인덱스 파일에만 쓴다. 수정 시각·크기가 같은 파일은 건너뛴다(증분).
+    prune=True면 폴더에서 사라진 파일을 인덱스에서도 정리한다.
     """
     root = os.path.abspath(os.path.expanduser(folder))
     if not os.path.isdir(root):
         raise RagError(f"'{root}' 폴더가 없습니다. 경로를 확인하세요.")
-    core._require_word()
     files = _iter_doc_files(root)
     if not files:
-        return f"'{root}' 아래에 Word 문서(.docx/.doc)가 없습니다."
+        return (f"'{root}' 아래에 인덱싱할 문서가 없습니다 "
+                f"(대상 확장자: {', '.join(sorted(DOC_PATTERNS))}).")
+    # Office COM은 Word/Excel 파일이 있을 때만 필요하다 — PDF만 넣는 PC에서 Office가
+    # 없다고 거부하면 안 되므로 여기서 조건부로 확인한다.
+    if any(core.doc_kind(f) in ("word", "excel") for f in files):
+        core._require_word()
 
     store = core.get_store()
     embed_ok = core._embed_available()
+    if use_vlm is None and any(core.doc_kind(f) == "pdf" for f in files):
+        # 파일마다 서버를 찔러 보지 않도록 한 번만 확인해 전체에 적용한다.
+        use_vlm = core.vision_ingest is not None and core.vision_ingest.vlm_available()
     results: list[str] = []
     ok = skipped = failed = 0
     start = time.time()
     for path in files:
         try:
-            note = _index_one_file(store, path, password, reindex, use_embed=embed_ok)
+            note = _index_one_file(store, path, password, reindex,
+                                   use_embed=embed_ok, use_vlm=use_vlm)
             if note.startswith("변경 없음"):
                 skipped += 1
             else:
@@ -122,22 +143,29 @@ def index_folder(folder: str, reindex: bool = False, prune: bool = True, passwor
         f"  임베딩: {'벡터 생성함' if embed_ok else '서버 없음 — 키워드 인덱스만 생성'}",
         f"  누적: 파일 {s['files']}개, 청크 {s['chunks']}개 (벡터 {s['with_vector']}개)",
     ]
+    if use_vlm is not None:
+        head.insert(3, f"  PDF 판독: {'VLM 전사' if use_vlm else '텍스트 레이어만 (VLM 서버 없음)'}")
     body = results[:100]
     if len(results) > 100:
         body.append(f"  … (이하 {len(results) - 100}개 생략)")
     return "\n".join(head + ([""] + body if body else []))
 
 
-def index_file(path: str, password: str = "") -> str:
-    """Word 문서 하나를 (다시) 인덱싱하고 결과 요약을 돌려준다."""
+def index_file(path: str, password: str = "", use_vlm: bool | None = None) -> str:
+    """문서 하나를 (다시) 인덱싱하고 결과 요약을 돌려준다."""
     p = os.path.abspath(os.path.expanduser(path))
     if not os.path.isfile(p):
         raise RagError(f"'{p}' 파일이 없습니다. 경로를 확인하세요.")
-    if os.path.splitext(p)[1].lower() not in DOC_PATTERNS:
-        raise RagError(f"Word 문서(.docx/.doc)만 인덱싱합니다: {os.path.basename(p)}")
-    core._require_word()
+    kind = core.doc_kind(p)
+    if not kind:
+        raise RagError(
+            f"인덱싱 대상이 아닌 확장자입니다: {os.path.basename(p)} "
+            f"(지원: {', '.join(sorted(DOC_PATTERNS))})"
+        )
+    if kind in ("word", "excel"):
+        core._require_word()
     store = core.get_store()
-    note = _index_one_file(store, p, password, reindex=True, use_embed=None)
+    note = _index_one_file(store, p, password, reindex=True, use_embed=None, use_vlm=use_vlm)
     return f"인덱싱 완료: {os.path.basename(p)} — {note}"
 
 
@@ -178,6 +206,13 @@ def main() -> None:
                         help=f"Qdrant 로컬 데이터 폴더 (기본 {core.QDRANT_PATH})")
     parser.add_argument("--embed-url", default=None,
                         help=f"임베딩 서버 /v1 베이스 URL (기본 {core.EMBED_URL})")
+    parser.add_argument("--vlm-url", default=None,
+                        help="PDF 전사용 VLM 서버 /v1 베이스 URL (사내 게이트웨이 주소)")
+    parser.add_argument("--vlm-model", default=None, help="VLM 모델 이름")
+    parser.add_argument("--dpi", type=int, default=None,
+                        help="PDF 렌더링 DPI (기본 150 — 413 오류가 나면 낮출 것)")
+    parser.add_argument("--no-vlm", action="store_true",
+                        help="PDF를 VLM 없이 텍스트 레이어만으로 인덱싱")
     args = parser.parse_args()
 
     if args.db:
@@ -186,6 +221,14 @@ def main() -> None:
         core.QDRANT_PATH = os.path.abspath(os.path.expanduser(args.qdrant))
     if args.embed_url:
         core.EMBED_URL = args.embed_url
+    if core.vision_ingest is not None:
+        if args.vlm_url:
+            core.vision_ingest.VLM_URL = args.vlm_url
+        if args.vlm_model:
+            core.vision_ingest.VLM_MODEL = args.vlm_model
+        if args.dpi:
+            core.vision_ingest.VLM_DPI = args.dpi
+    use_vlm = False if args.no_vlm else None
 
     if core.pythoncom is not None:  # CLI 메인 스레드 COM 초기화 (Word 읽기용)
         core.pythoncom.CoInitialize()
@@ -213,13 +256,14 @@ def main() -> None:
 
         if args.file:
             _require_qdrant_or_exit(core.get_store())
-            print(index_file(args.file, password=args.password))
+            print(index_file(args.file, password=args.password, use_vlm=use_vlm))
             return
 
         if args.folder:
             _require_qdrant_or_exit(core.get_store())
             print(index_folder(args.folder, reindex=args.reindex,
-                               prune=not args.no_prune, password=args.password))
+                               prune=not args.no_prune, password=args.password,
+                               use_vlm=use_vlm))
             return
 
         parser.print_help()

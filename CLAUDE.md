@@ -58,13 +58,16 @@ pywin32(COM)로 **이미 로그인·실행 중인** Office/Outlook을 직접 조
 
 `test_outlook.py` — outlook_server 도구들을 실제 Outlook에 대고 한 번씩 호출하는 수동 스모크 테스트. **되돌리기 어려운 동작은 절대 실행하지 않는다** (어디에서도 `confirm=True`를 넘기지 않고, 🔴 도구는 프리뷰 경로만 확인한다). `--create` 플래그를 줘야 🟡 로컬 생성을 시도하고, 만든 항목은 곧바로 지운편지함으로 정리한다. 이 원칙을 깨는 수정을 하지 말 것.
 
-### `mcp_server/rag_core.py` · `rag_indexer.py` · `rag_server.py` — Word 문서 RAG (구성·서빙 분리)
+### `mcp_server/rag_core.py` · `vision_ingest.py` · `rag_indexer.py` · `rag_server.py` — 문서 RAG (구성·서빙 분리)
 
-폴더의 .docx/.doc를 청킹·임베딩해 인덱싱하고 하이브리드 검색(벡터+FTS5 trigram, RRF 융합)을 제공한다. **구성과 서빙이 파일로 분리돼 있고, 이 구분을 유지할 것**:
+폴더의 **.docx/.doc/.pdf/.xlsx**를 청킹·임베딩해 인덱싱하고 하이브리드 검색(벡터+FTS5 trigram, RRF 융합)을 제공한다. **구성과 서빙이 파일로 분리돼 있고, 이 구분을 유지할 것**:
 
 - `rag_core.py` — 공용 코어(문서 읽기·청킹·임베딩·저장소). 실행 파일 아님. 설정(DB_PATH 등)은 CLI가 덮어쓰므로 다른 모듈에서는 `core.DB_PATH`처럼 **매번 속성으로** 읽는다(from-import 복사 금지).
+- `vision_ingest.py` — **PDF 인제스트**(페이지 이미지 → VLM 전사). 아래 'Vision RAG' 절. 서버 없이 `python mcp_server\vision_ingest.py --probe <PDF>`로 진단.
 - `rag_indexer.py` — **구성 CLI** (🟡 인덱싱 / 🔴 `--clear`는 `--yes` 없이 프리뷰만). `run_rag_indexer.bat`.
-- `rag_server.py` — **서빙 MCP** (🟢 search_docs/rag_status **읽기 전용** — 모델이 인덱스를 못 건드린다). `run_rag_server.bat`, stdio 기본, http/sse는 :8090.
+- `rag_server.py` — **서빙 MCP** (🟢 search_docs/read_page/ask_page/rag_status **읽기 전용** — 모델이 인덱스를 못 건드린다). `run_rag_server.bat`, stdio 기본, http/sse는 :8090.
+
+확장자→읽는 경로는 `DOC_KINDS` 한 곳에서 정한다: word=Word COM, excel=Excel COM, pdf=vision_ingest. 어느 경로든 결과는 **같은 모양의 청크 레코드**(`{heading, content, page, image}`)라 검색·임베딩은 원본 종류를 모른다 — 새 형식을 추가할 땐 `extract_chunks`에 분기 하나만 더하면 된다. 옛 `(heading, content)` 튜플도 `replace_file`이 받아 준다(하위 호환).
 
 저장: 청크 본문·키워드 인덱스는 sqlite(rag_index.db), 벡터는 **Qdrant 로컬(파일) 모드**(rag_vectors/ — 서버 프로세스 없음, qdrant-client는 사내 미러 등록됨). qdrant-client가 없으면 sqlite BLOB 벡터로 우아하게 저하한다. ⚠ Qdrant 로컬은 단일 프로세스 잠금 — **rag_indexer는 서빙이 잠금을 쥐고 있으면 시작을 거부한다(exit 2)**. 조용히 sqlite로 저하해 인덱싱하면 서빙과 다른 저장소에 벡터가 쌓여 검색이 어긋나기 때문이다. 인덱싱할 때는 서빙을 잠시 내릴 것. llm_studio는 `docs`라는 이름으로 rag_server를 **자동 등록**한다(도구는 `docs__search_docs` 등) — 앱이 떠 있는 동안 잠금을 쥐므로 인덱싱하려면 앱을 끄거나 설정에서 `docs`를 꺼야 한다.
 
@@ -72,6 +75,18 @@ pywin32(COM)로 **이미 로그인·실행 중인** Office/Outlook을 직접 조
 - **임베딩은 llama-server `--embeddings`**(기본 `http://127.0.0.1:8001/v1`, EmbeddingGemma 등 GGUF를 CPU `-ngl 0` 상주 권장). **서버가 없으면 키워드 인덱스만 만들고 검색도 키워드 전용으로 우아하게 저하** — 나중에 서버를 켜고 `--reindex`로 돌리면 벡터가 붙는다. 이 저하 경로 덕에 임베딩 모델 반입 전에도 개발·검증이 가능하다.
 - 임베딩 모델을 바꿔 벡터 차원이 달라지면 Qdrant 컬렉션을 자동 재생성한다(stderr 경고) — 이후 전체 `--reindex` 필요.
 - 키워드 검색은 llm_studio `memory.py`와 같은 패턴(FTS5 trigram + 조사 제거 LIKE 저하)이다 — 한쪽 휴리스틱을 고치면 다른 쪽도 확인할 것.
+
+#### Vision RAG — 표·도면이 많은 PDF (`vision_ingest.py`)
+
+표준품 선정 지침서·스펙 도면·부품 스펙처럼 **표와 그림이 본문인 PDF**는 텍스트 레이어만 뽑으면 내용이 사라진다(표가 좌우 그룹으로 쪼개져 추출 순서가 엉키고, 스캔본은 텍스트가 아예 없다). 그래서 **페이지를 그림으로 렌더링해 VLM에게 전사시키고**, 그 전사문을 기존 청킹·임베딩·검색 파이프라인에 태운다. spec-reader에서 VLM 판독이 실제로 잘 되는 걸 확인한 뒤 그 경로를 RAG 인제스트로 옮긴 것이다.
+
+- **저하 체인(쪽 하나 기준)**: ① VLM 전사 → ② PyMuPDF 텍스트 레이어 → ③ `pdf_server._extract`(DRM PDF를 Word COM으로; 쪽 구분이 없어 `page=0`). 전부 실패하면 예외 대신 그 쪽을 건너뛰고 사유를 알림으로 남긴다. VLM이 아예 없어도 `--no-vlm`으로 텍스트 인덱스 뼈대를 먼저 만들고, 나중에 VLM을 켜고 `--reindex`하면 전사가 붙는다.
+- **청크 경계 = 쪽 경계.** 쪽 번호와 이미지가 청크마다 정확히 하나로 대응해야 "몇 쪽을 보라"고 답할 수 있다. 한 쪽이 길면 그 쪽 안에서만 나누고 page/image를 물려준다. 전사 첫 줄의 `# 제목`(PAGE_PROMPT가 요구)이 섹션 경로가 된다.
+- **되짚어 가는 경로가 핵심이다.** 페이지 이미지를 `rag_pages/`에 남겨 두고, `read_page`(전사 원문 그대로)와 `ask_page`(**그 쪽 그림을 VLM에 다시 보여 주며 질문**)로 검색 결과에서 원본까지 내려갈 수 있게 했다. 텍스트로 한 번 접힌 표를 원본으로 되짚는 이 경로가 없으면 vision RAG는 그냥 OCR RAG다. 캐시가 지워졌으면 `ensure_page_image`가 즉석 렌더링한다.
+- **DPI 기본 150 + 긴 변 2000px.** 300 DPI 전면 페이지는 사내 게이트웨이 요청 크기 제한에 걸려 413이 났다(spec-reader 실측). 413이 나면 `--dpi`를 더 낮출 것. Pillow가 없으면 축소를 못 해 DPI로만 조절한다.
+- VLM 주소는 `RAG_VLM_URL`/`--vlm-url`. 기본값은 localhost지만 **사내 호스팅 게이트웨이 주소를 넣는 것이 정상 운용**이다(spec-reader `config.py`가 쓰는 그 주소).
+
+⚠ **치수를 RAG로 재지 말 것.** 이 경로로 넣은 치수표는 사람이 찾아보는 **참고용**이다. 판독값을 실제 부품 선정에 쓰려면 `spec-reader/read_spec.py` + `verify.py`(L−K_max 계열 상수 등 자동 검증)를 거쳐야 한다 — RAG는 청크 경계에서 숫자가 잘릴 수 있고 판독 검증이 없다. 같은 이유로 **엑셀 표준품 목록의 정확 조회는 `catalog.py`가 엑셀을 직접 읽어서** 한다. RAG에 넣은 엑셀 텍스트는 "이런 계열이 있더라"를 찾는 용도다. 이 분업(RAG=찾기 / 결정론적 함수=고르기)이 `spec-reader/CLAUDE.md`의 "VLM은 판독만, 선정 판단은 결정론적 함수로"와 같은 원칙이다.
 
 ### `mcp_server/ansys_server.py` — ANSYS MAPDL 열해석 MCP 서버
 
@@ -147,6 +162,8 @@ FastAPI 서버 + 브라우저 채팅 UI + llama-server 프로세스 관리를 �
 
 **이 폴더는 아직 MCP 서버가 아니다** — CLI(`read_spec.py`)다. 에이전트 도구로 만드는 게 다음 작업이고, 그때 `mcp_server/` 규약(3티어·우아한 저하·stdio stdout 금지)을 따라 감싸면 된다.
 
+**Vision RAG와의 분업**(위 rag 절 참고): 지침서·스펙을 통째로 RAG에 넣어 "어디에 뭐라고 쓰여 있나"를 찾는 것은 `vision_ingest.py`가, **판독값을 검증해 부품을 고르는 것**은 여기가 한다. 같은 PDF가 양쪽에 들어가지만 쓰임이 다르다 — RAG 결과를 치수 근거로 삼지 말 것.
+
 핵심 원칙 (항공 부품이라 타협 불가 — `spec-reader/CLAUDE.md`·`HANDOFF.md`에 상세):
 - **VLM은 판독만, 선정 판단은 결정론적 함수로.** LLM이 부품을 "고르면" 환각이 곧 비행 안전 문제가 된다.
 - **판독값은 자동 검증 통과 후에만 쓴다.** 검증 규칙은 데이터에서 찾은 불변식이다 — `L − K_max`가 계열 상수(MS9555=0.578, MS9556=0.630), `L`이 1/16″ 격자 위, dash 중복·누락 없음. 새 표준을 추가할 땐 **그 계열의 불변식을 먼저 찾을 것.**
@@ -179,6 +196,8 @@ python mcp_server\outlook_server.py --transport http  # n8n용, :8088 (catia :80
 python mcp_server\test_outlook.py                     # 읽기 전용 스모크 테스트
 mcp_server\run_office_server.bat                      # 위 http 실행의 더블클릭용 (서버별, mcp_server 안)
 mcp_server\run_rag_indexer.bat ..\rag_docs            # RAG 인덱스 구성 (rag_docs 투입, 서빙은 내리고 실행)
+python mcp_server\rag_indexer.py C:\specs --vlm-url http://<사내VLM>/v1   # PDF를 VLM으로 전사해 인덱싱
+python mcp_server\vision_ingest.py --probe C:\specs\MS9555.pdf           # PDF 전사 백엔드 진단
 
 # 로컬 LLM
 python llm_studio\serve_llm.py --model C:/models/gemma-12b-it-qat.gguf
