@@ -237,13 +237,14 @@ def ask_page(document: str, page: int, question: str) -> str:
     rows = store.page_chunks(path, int(page))
     img = next((r["image"] for r in rows if r.get("image")), "")
     if not img or not os.path.isfile(img):
-        # 캐시가 지워졌거나 인덱싱 때 이미지를 못 남긴 경우 — 즉석 렌더링으로 복구한다.
-        img = core.vision_ingest.ensure_page_image(path, int(page))
+        # 캐시가 지워졌거나 인덱싱 때 이미지를 못 남긴 경우 — 즉석 렌더링으로 복구한다
+        # (Word는 다시 PDF로 내보내 렌더링한다).
+        img = core.ensure_page_image(path, int(page))
     if not img:
         raise RagError(
             f"'{os.path.basename(path)}' {page}쪽의 이미지를 얻지 못했습니다. "
-            "PDF가 아니거나(쪽 이미지 없음) PyMuPDF가 없을 수 있습니다 — read_page로 "
-            "전사 원문을 읽어 보세요."
+            "쪽 이미지가 없는 문서(텍스트로만 인덱싱된 Word/Excel)이거나 PyMuPDF가 "
+            "없을 수 있습니다 — read_page로 전사 원문을 읽어 보세요."
         )
     prompt = (
         "이 페이지를 보고 아래 질문에 답하세요. 페이지에 있는 내용만 근거로 삼고, "

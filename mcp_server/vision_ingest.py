@@ -174,7 +174,11 @@ def ask_image(png_bytes: bytes, prompt: str) -> str | None:
 
 
 def _cache_dir_for(path: str) -> Path:
-    """파일별 이미지 캐시 폴더. 같은 이름 다른 폴더가 섞이지 않게 경로 해시를 붙인다."""
+    """파일별 이미지 캐시 폴더. 같은 이름 다른 폴더가 섞이지 않게 경로 해시를 붙인다.
+
+    Word를 임시 PDF로 내보내 읽는 경로에서는 **원본 .docx 경로**를 키로 넘긴다
+    (image_key) — 임시 PDF 이름으로 캐시하면 매번 새 폴더가 생겨 되짚기가 끊긴다.
+    """
     stem = re.sub(r"[^\w.-]+", "_", Path(path).stem)[:60] or "doc"
     h = hashlib.sha1(os.path.abspath(path).encode("utf-8")).hexdigest()[:8]
     return Path(PAGE_IMAGE_DIR) / f"{stem}_{h}"
@@ -275,12 +279,17 @@ def _pdf_fallback_text(path: str) -> tuple[str, str]:
 
 def extract_pdf_pages(
     path: str, use_vlm: bool | None = None, dpi: int = 0, max_pages: int = 0,
+    image_key: str = "",
 ) -> tuple[list[dict], list[str]]:
     """PDF를 페이지 단위로 읽어 [{page, text, image, source}, ...] 와 알림 목록을 돌려준다.
 
     use_vlm=None이면 서버 응답 여부를 확인해 자동으로 정한다. False면 텍스트 레이어만
     쓴다(VLM 없이 인덱스 뼈대를 먼저 만들고, 나중에 --reindex로 전사를 붙이는 운용).
+
+    image_key: 페이지 이미지를 캐시할 때 쓸 키(기본은 path). Word를 임시 PDF로 내보내
+    읽을 때 **원본 .docx 경로**를 넘겨 캐시가 원본에 붙게 한다.
     """
+    key = image_key or path
     notes: list[str] = []
     if use_vlm is None:
         use_vlm = vlm_available()
@@ -333,7 +342,7 @@ def extract_pdf_pages(
                     png = b""
                     notes.append(f"p{pno} 렌더링 실패({type(e).__name__})")
                 if png:
-                    image = _save_page_image(path, pno, png)
+                    image = _save_page_image(key, pno, png)
                     got = ask_image(png, PAGE_PROMPT)
                     if got and len(got.strip()) >= MIN_TRANSCRIPT_CHARS:
                         text, source = got.strip(), "vlm"

@@ -19,6 +19,7 @@ Word/Excel은 COM으로, **PDF는 페이지 이미지 → VLM 전사(Vision RAG)
     python rag_indexer.py --file C:\docs\a.pdf  # 파일 하나만 다시
     python rag_indexer.py C:\specs --vlm-url http://<사내VLM>/v1 --vlm-model gemma-3-27b
     python rag_indexer.py C:\docs --no-vlm      # PDF도 텍스트 레이어만 (VLM 없이 뼈대부터)
+    python rag_indexer.py C:\guide --word-vision  # Word 지침서도 표·그림째로 (PDF 변환 후 전사)
     python rag_indexer.py --status              # 인덱스 상태 확인
     python rag_indexer.py --clear               # 삭제 프리뷰 (실행 안 함)
     python rag_indexer.py --clear --yes         # 인덱스 전체 삭제
@@ -57,13 +58,14 @@ def _iter_doc_files(folder: str) -> list[str]:
 
 def _index_one_file(store: RagStore, path: str, password: str = "",
                     reindex: bool = False, use_embed: bool | None = None,
-                    use_vlm: bool | None = None) -> str:
+                    use_vlm: bool | None = None, word_vision: bool = False) -> str:
     """파일 하나를 인덱싱한다. 반환: 한 줄 결과 요약."""
     st = os.stat(path)
     if not reindex and store.file_unchanged(path, st.st_mtime, st.st_size):
         return "변경 없음 — 건너뜀"
     kind = core.doc_kind(path)
-    chunks, source, notes = core.extract_chunks(path, password, use_vlm=use_vlm)
+    chunks, source, notes = core.extract_chunks(path, password, use_vlm=use_vlm,
+                                                word_vision=word_vision)
     if not chunks:
         store.replace_file(path, st.st_mtime, st.st_size, [], None, kind, source)
         return "본문 없음 — 청크 0개"
@@ -91,7 +93,8 @@ def _index_one_file(store: RagStore, path: str, password: str = "",
 
 
 def index_folder(folder: str, reindex: bool = False, prune: bool = True,
-                 password: str = "", use_vlm: bool | None = None) -> str:
+                 password: str = "", use_vlm: bool | None = None,
+                 word_vision: bool = False) -> str:
     """폴더(하위 포함)의 문서를 모두 인덱싱하고 결과 요약을 돌려준다.
 
     Word/Excel은 COM으로, PDF는 페이지 이미지 → VLM 전사로 읽는다. 원본 문서는 읽기만
@@ -112,7 +115,9 @@ def index_folder(folder: str, reindex: bool = False, prune: bool = True,
 
     store = core.get_store()
     embed_ok = core._embed_available()
-    if use_vlm is None and any(core.doc_kind(f) == "pdf" for f in files):
+    needs_vlm = any(core.doc_kind(f) == "pdf" for f in files) or (
+        word_vision and any(core.doc_kind(f) == "word" for f in files))
+    if use_vlm is None and needs_vlm:
         # 파일마다 서버를 찔러 보지 않도록 한 번만 확인해 전체에 적용한다.
         use_vlm = core.vision_ingest is not None and core.vision_ingest.vlm_available()
     results: list[str] = []
@@ -120,8 +125,8 @@ def index_folder(folder: str, reindex: bool = False, prune: bool = True,
     start = time.time()
     for path in files:
         try:
-            note = _index_one_file(store, path, password, reindex,
-                                   use_embed=embed_ok, use_vlm=use_vlm)
+            note = _index_one_file(store, path, password, reindex, use_embed=embed_ok,
+                                   use_vlm=use_vlm, word_vision=word_vision)
             if note.startswith("변경 없음"):
                 skipped += 1
             else:
@@ -151,7 +156,8 @@ def index_folder(folder: str, reindex: bool = False, prune: bool = True,
     return "\n".join(head + ([""] + body if body else []))
 
 
-def index_file(path: str, password: str = "", use_vlm: bool | None = None) -> str:
+def index_file(path: str, password: str = "", use_vlm: bool | None = None,
+               word_vision: bool = False) -> str:
     """문서 하나를 (다시) 인덱싱하고 결과 요약을 돌려준다."""
     p = os.path.abspath(os.path.expanduser(path))
     if not os.path.isfile(p):
@@ -165,7 +171,8 @@ def index_file(path: str, password: str = "", use_vlm: bool | None = None) -> st
     if kind in ("word", "excel"):
         core._require_word()
     store = core.get_store()
-    note = _index_one_file(store, p, password, reindex=True, use_embed=None, use_vlm=use_vlm)
+    note = _index_one_file(store, p, password, reindex=True, use_embed=None,
+                           use_vlm=use_vlm, word_vision=word_vision)
     return f"인덱싱 완료: {os.path.basename(p)} — {note}"
 
 
@@ -213,6 +220,8 @@ def main() -> None:
                         help="PDF 렌더링 DPI (기본 150 — 413 오류가 나면 낮출 것)")
     parser.add_argument("--no-vlm", action="store_true",
                         help="PDF를 VLM 없이 텍스트 레이어만으로 인덱싱")
+    parser.add_argument("--word-vision", action="store_true",
+                        help="Word 문서도 PDF로 내보내 VLM으로 전사 (표·그림이 본문인 지침서용)")
     args = parser.parse_args()
 
     if args.db:
@@ -256,14 +265,15 @@ def main() -> None:
 
         if args.file:
             _require_qdrant_or_exit(core.get_store())
-            print(index_file(args.file, password=args.password, use_vlm=use_vlm))
+            print(index_file(args.file, password=args.password, use_vlm=use_vlm,
+                             word_vision=args.word_vision))
             return
 
         if args.folder:
             _require_qdrant_or_exit(core.get_store())
             print(index_folder(args.folder, reindex=args.reindex,
                                prune=not args.no_prune, password=args.password,
-                               use_vlm=use_vlm))
+                               use_vlm=use_vlm, word_vision=args.word_vision))
             return
 
         parser.print_help()

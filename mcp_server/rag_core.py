@@ -35,14 +35,17 @@ import json
 import math
 import os
 import re
+import shutil
 import sqlite3
 import struct
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 
@@ -199,6 +202,54 @@ def _extract_word_text(path: str, password: str = "") -> str:
     with _document("word", path, password) as doc:
         raw = doc.Content.Text
     return _clean_word_text(raw or "")
+
+
+# ─────────────────────────── Word → PDF (Vision 경로 진입로) ───────────────────────────
+# 표·그림이 본문인 지침서는 Word COM의 텍스트 추출로는 내용이 절반 날아간다(표는 셀
+# 구분이 뭉개지고 그림은 아예 안 나온다). Word에게 PDF로 내보내게 한 뒤 그 PDF를
+# vision_ingest에 태우면 PDF 스펙과 **똑같은 경로**로 표·도면까지 들어온다.
+#
+# Word가 여는 것이라 사내 DRM 문서도 그대로 통과한다(office_server와 같은 원리).
+# 임시 PDF는 쓰고 나서 지우고, 페이지 이미지 캐시는 **원본 .docx 경로**를 키로 남긴다
+# (임시 파일 이름으로 캐시하면 다음 실행 때 되짚기가 끊긴다).
+
+WD_EXPORT_PDF = 17            # wdExportFormatPDF
+WD_EXPORT_OPTIMIZE_PRINT = 0  # wdExportOptimizeForPrint — 표 선이 뭉개지지 않게
+WD_EXPORT_ALL = 0             # wdExportAllDocument
+WD_EXPORT_CONTENT = 0         # wdExportDocumentContent
+WD_EXPORT_NO_BOOKMARKS = 0    # wdExportCreateNoBookmarks
+
+
+@contextmanager
+def _word_as_pdf(path: str, password: str = ""):
+    """Word 문서를 임시 PDF로 내보내 그 경로를 넘겨주고, 끝나면 지운다."""
+    _require_word()
+    tmpdir = tempfile.mkdtemp(prefix="rag_word_")
+    out = os.path.join(tmpdir, "export.pdf")
+    try:
+        with _document("word", path, password) as doc:
+            try:
+                # ⚠ 위치 인자로 넘긴다 — pywin32 동적 디스패치가 일부 메서드에서 키워드를
+                # 조용히 흘리는 문제(office_server의 Find.Execute·문서 열기 Password와
+                # 같은 함정)를 피하기 위해서다.
+                doc.ExportAsFixedFormat(
+                    out, WD_EXPORT_PDF, False, WD_EXPORT_OPTIMIZE_PRINT,
+                    WD_EXPORT_ALL, 0, 0, WD_EXPORT_CONTENT, True, True,
+                    WD_EXPORT_NO_BOOKMARKS, True, True, False,
+                )
+            except Exception as e:  # noqa: BLE001 — COM 오류를 안내로 바꾼다
+                raise RagError(
+                    f"'{os.path.basename(path)}'를 PDF로 내보내지 못했습니다: {e}. "
+                    "Word 없이 텍스트만 넣으려면 --word-vision 없이 다시 실행하세요."
+                ) from e
+        if not os.path.isfile(out) or os.path.getsize(out) == 0:
+            raise RagError(
+                f"'{os.path.basename(path)}'의 PDF 내보내기 결과가 비어 있습니다. "
+                "문서가 열려 있는지, 디스크 여유가 있는지 확인하세요."
+            )
+        yield out
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # ─────────────────────────────── 문서 읽기 (Excel COM) ───────────────────────────────
@@ -1009,34 +1060,92 @@ def doc_kind(path: str) -> str:
     return DOC_KINDS.get(os.path.splitext(path)[1].lower(), "")
 
 
-def extract_chunks(path: str, password: str = "",
-                   use_vlm: bool | None = None) -> tuple[list[dict], str, list[str]]:
+def _require_vision() -> None:
+    if vision_ingest is None:
+        raise RagError(
+            f"Vision 경로를 쓸 수 없습니다: vision_ingest를 불러오지 못했습니다"
+            f"({VISION_IMPORT_ERROR})."
+        )
+
+
+def _pages_to_chunks(pages: list[dict], notes: list[str]) -> tuple[list[dict], str]:
+    """쪽 목록을 청크로 만들고 '무엇으로 읽었는지'를 정한다."""
+    # 한 페이지라도 VLM 전사가 있으면 vision, 전부 텍스트면 그 백엔드 이름을 남긴다.
+    sources = {p.get("source") or "text" for p in pages}
+    return chunk_pages(pages), ("vision" if "vlm" in sources else "/".join(sorted(sources)))
+
+
+def extract_chunks(path: str, password: str = "", use_vlm: bool | None = None,
+                   word_vision: bool = False) -> tuple[list[dict], str, list[str]]:
     """파일 하나에서 청크 레코드를 뽑는다. 반환: (청크들, 사용한 경로, 알림들).
 
     확장자에 따라 Word COM / Excel COM / Vision(PDF)로 갈린다. 어느 쪽이든 결과는
     같은 모양의 청크 레코드라, 아래 인덱싱·검색은 원본 종류를 몰라도 된다.
+
+    word_vision=True면 Word 문서도 PDF로 내보내 Vision 경로로 읽는다 — 표·그림이
+    본문인 지침서용. 기본값 False(텍스트 추출)인 이유는 셋이다: 훨씬 빠르고, Word가
+    뽑은 텍스트가 전사보다 정확하며, PyMuPDF·VLM 없이도 동작하기 때문이다.
     """
     kind = doc_kind(path)
     if kind == "word":
-        return chunk_document(_extract_word_text(path, password)), "word", []
+        if not word_vision:
+            return chunk_document(_extract_word_text(path, password)), "word", []
+        _require_vision()
+        with _word_as_pdf(path, password) as pdf:
+            # image_key: 이미지 캐시를 임시 PDF가 아니라 **원본 .docx**에 붙인다.
+            pages, notes = vision_ingest.extract_pdf_pages(
+                pdf, use_vlm=use_vlm, image_key=path
+            )
+        if not pages:
+            raise RagError(
+                "Word 문서를 PDF로 내보냈지만 본문을 얻지 못했습니다: "
+                + ("; ".join(notes) or "사유 불명")
+            )
+        chunks, source = _pages_to_chunks(pages, notes)
+        return chunks, f"word→{source}", notes
     if kind == "excel":
         return chunk_document(_extract_excel_text(path, password)), "excel", []
     if kind == "pdf":
-        if vision_ingest is None:
-            raise RagError(
-                f"PDF를 읽을 수 없습니다: vision_ingest를 불러오지 못했습니다({VISION_IMPORT_ERROR})."
-            )
+        _require_vision()
         pages, notes = vision_ingest.extract_pdf_pages(path, use_vlm=use_vlm)
         if not pages:
             raise RagError("PDF에서 본문을 얻지 못했습니다: " + ("; ".join(notes) or "사유 불명"))
-        # 한 페이지라도 VLM 전사가 있으면 vision, 전부 텍스트면 그 백엔드 이름을 남긴다.
-        sources = {p.get("source") or "text" for p in pages}
-        source = "vision" if "vlm" in sources else "/".join(sorted(sources))
-        return chunk_pages(pages), source, notes
+        chunks, source = _pages_to_chunks(pages, notes)
+        return chunks, source, notes
     raise RagError(
         f"인덱싱 대상이 아닌 확장자입니다: {os.path.basename(path)} "
         f"(지원: {', '.join(sorted(DOC_KINDS))})"
     )
+
+
+def ensure_page_image(path: str, page: int) -> str:
+    """쪽 이미지를 확보한다(캐시 → 즉석 렌더링). 못 얻으면 빈 문자열.
+
+    ask_page가 쓰는 경로다. Word 문서는 캐시가 없으면 다시 PDF로 내보내 렌더링한다 —
+    캐시를 지웠다고 되짚기가 막히면 안 되기 때문이다(원본은 건드리지 않는다).
+    """
+    if vision_ingest is None:
+        return ""
+    cached = vision_ingest.page_image_path(path, page)
+    if cached:
+        return cached
+    kind = doc_kind(path)
+    if kind == "pdf":
+        return vision_ingest.ensure_page_image(path, page)
+    if kind == "word":
+        try:
+            with _word_as_pdf(path) as pdf:
+                doc = vision_ingest.fitz.open(pdf) if vision_ingest.FITZ_AVAILABLE else None
+                if doc is None or not 1 <= page <= len(doc):
+                    return ""
+                try:
+                    png = vision_ingest.render_page(doc, page)
+                finally:
+                    doc.close()
+                return vision_ingest._save_page_image(path, page, png)
+        except Exception:  # noqa: BLE001 — 되짚기가 안 되면 호출부가 안내로 물러선다
+            return ""
+    return ""
 
 
 def status_text() -> str:

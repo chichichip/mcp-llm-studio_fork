@@ -6,6 +6,7 @@ rem        run_rag_indexer.bat ..\rag_docs --reindex (rebuild all, with embeddin
 rem        run_rag_indexer.bat C:\any\folder         (or point at any folder)
 rem        run_rag_indexer.bat C:\specs --vlm-url http://<host>/v1 --vlm-model <name>
 rem        run_rag_indexer.bat C:\docs --no-vlm    (PDF text layer only, no VLM)
+rem        run_rag_indexer.bat C:\guide --word-vision  (Word via PDF export + VLM)
 rem        run_rag_indexer.bat --status           (show index status)
 rem        run_rag_indexer.bat --clear --yes      (delete the whole index)
 rem Running without arguments shows status and usage.
