@@ -21,6 +21,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **인터넷을 전제한 코드를 새로 넣지 말 것.** 런타임에 나가는 HTTP는 전부 localhost여야 한다. 패키지·모델·바이너리를 실행 중에 내려받는 코드는 폐쇄망에서 무조건 죽는다.
 - **새 의존성은 사내 미러에 있는지 먼저 의심할 것.** 추가하면 반드시 `requirements.txt`에 명시하고, 없을 때 어떻게 되는지(우아한 저하 or 실패)를 주석에 적는다. `fastmcp`는 특히 위험한 축에 속한다 (개발 PC 검증 버전 3.4.4).
+- **반입물 목록은 루트 `반입목록.md`에 모아 둔다.** 패키지/실행파일/모델을 나눠 적고, 없을 때 무엇이 저하되는지까지 표로 정리한 문서다. 새 의존성을 추가하면 requirements.txt와 **이 문서 양쪽**에 반영할 것.
 - **대용량 파일은 git에 넣지 않는다.** `.gguf` 모델, `llama-server.exe`+CUDA DLL, PyInstaller 산출물은 `.gitignore`로 막혀 있다. GitHub는 파일당 100MB 제한이 있고, 이것들은 USB 등 별도 매체로 옮긴다.
 - 폐쇄망에서는 소스 직접 실행과 exe 설치 **두 경로를 모두 지원한다** (아래 llm_studio 참고).
 

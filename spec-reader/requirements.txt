@@ -1,3 +1,7 @@
 requests
 PyMuPDF
 Pillow
+
+# catalog.py — 엔진 적용 표준품 목록(엑셀) 직접 조회.
+# 없으면 catalog는 CSV만 읽는다(엑셀을 CSV로 저장해 두면 우회 가능).
+openpyxl
