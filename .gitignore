@@ -44,5 +44,6 @@ rag_docs/*
 !rag_docs/README.md
 
 # 폐쇄망 오프라인 설치용 wheel 모음 (install_requirements.bat이 여기서 설치).
-# .whl은 대용량이고 USB 등으로 반입하므로 git에 넣지 않는다.
-wheelhouse/
+# 예전에는 USB 반입을 전제로 제외했지만, 지금은 **git으로 실어 나른다** — 회사 PC가
+# clone만 하면 되고 USB 왕복이 없다. 전부 공개 PyPI 패키지라 민감 정보가 아니다.
+# 개당 100MB(GitHub 제한)를 넘는 파일은 여전히 넣지 말 것.

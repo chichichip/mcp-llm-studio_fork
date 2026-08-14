@@ -174,7 +174,7 @@ FastAPI 서버 + 브라우저 채팅 UI + llama-server 프로세스 관리를 �
 
 구조: `read_spec.py`(CLI: preview/read/meta) · `verify.py`(검증 — VLM 없이 동작해 외부망에서 개발 가능) · `merge.py`(다중 페이지 병합 — 행 분할/컬럼 분할 둘 다) · `prompts.py`(판독이 안 맞으면 여기만 고친다) · `selftest.py`(fixture 회귀 — 오독 4종 주입 검출) · `fixtures/MS9555.json`(공개 표준 정답 29행).
 
-⚠ 제약이 이 저장소와 다르다: 사내 PC **파이썬 3.10**(Pillow는 10.4.0 — 11부터 3.10 미지원), VLM 요청 크기 제한으로 300 DPI 전체 페이지는 413 → `--dpi 150` 또는 `--crop` 필요. `config.py`(사내 URL/모델명)는 `.gitignore`에 있고 `config.example.py`를 복사해 채운다.
+⚠ 제약이 이 저장소와 다르다: 사내 PC **파이썬 3.10**(휠은 `cp310`+`win_amd64`를 받아야 한다 — 다만 `HANDOFF.md`의 'Pillow는 10.4.0이 상한'은 사실이 아니다: Pillow 12에도 cp310 휠이 있다), VLM 요청 크기 제한으로 300 DPI 전체 페이지는 413 → `--dpi 150` 또는 `--crop` 필요. `config.py`(사내 URL/모델명)는 `.gitignore`에 있고 `config.example.py`를 복사해 채운다.
 
 ### `Examples/` — 강의 자료 (추적 안 됨)
 
