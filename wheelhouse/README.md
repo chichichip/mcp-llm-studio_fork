@@ -3,13 +3,17 @@
 **사내 PC 파이썬 3.10 / 64비트 윈도우(`cp310` + `win_amd64`) 기준**으로 받아 둔
 `.whl` 모음이다. 인터넷도, 사내 PyPI 미러도 없이 여기 있는 파일만으로 설치된다.
 
+이 저장소는 **git도 pip 다운로드도 안 되는 PC**로 옮기는 것을 전제한다. GitHub 웹에서
+저장소를 ZIP으로 받으면 이 폴더가 통째로 따라오므로, USB로 옮겨 압축만 풀면 된다.
+
 ## 설치
 
 ```cmd
 install_requirements.bat
 ```
 
-`MIRROR_INDEX`를 비워 두면 `--no-index`로 **이 폴더에서만** 설치한다.
+`MIRROR_INDEX`를 비워 두면 `--no-index`로 **이 폴더에서만** 설치한다(네트워크 안 씀).
+`pip` 명령이 없다고 하면 `python -m pip` 으로 부를 것 — 대개 PATH 문제다.
 직접 하려면:
 
 ```cmd
@@ -30,6 +34,7 @@ pip install --no-index --find-links=wheelhouse -r spec-reader\requirements.txt
 | `pypdf`, `python-docx`, `openpyxl` | PDF/Word/엑셀 읽기 |
 | `requests` | spec-reader의 VLM 판독 |
 | `numpy` | 선택 — sqlite 벡터 코사인 가속 |
+| `pip`, `setuptools`, `wheel` | 파이썬에 pip이 안 딸려 왔을 때 부트스트랩용 |
 
 나머지는 위 패키지들의 의존성이다(pydantic, httpx, starlette 등).
 
@@ -50,7 +55,8 @@ pip download -r spec-reader\requirements.txt -d wheelhouse ^
 
 받은 뒤 파일명을 확인할 것: 바이너리 휠은 `cp310-...-win_amd64.whl`,
 순수 파이썬은 `py3-none-any.whl`이어야 한다. `cp311`이나 `manylinux`가 보이면
-잘못 받은 것이다.
+잘못 받은 것이다. 3.10 호환인지는 각 휠의 METADATA에서 `Requires-Python`을 읽어
+`>=3.11` 같은 하한이 있는지 보면 한 번에 확인된다.
 
 ## 여기 없는 것
 
