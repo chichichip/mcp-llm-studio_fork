@@ -87,7 +87,8 @@ pywin32(COM)로 **이미 로그인·실행 중인** Office/Outlook을 직접 조
 - **청크 경계 = 쪽 경계.** 쪽 번호와 이미지가 청크마다 정확히 하나로 대응해야 "몇 쪽을 보라"고 답할 수 있다. 한 쪽이 길면 그 쪽 안에서만 나누고 page/image를 물려준다. 전사 첫 줄의 `# 제목`(PAGE_PROMPT가 요구)이 섹션 경로가 된다.
 - **되짚어 가는 경로가 핵심이다.** 페이지 이미지를 `rag_pages/`에 남겨 두고, `read_page`(전사 원문 그대로)와 `ask_page`(**그 쪽 그림을 VLM에 다시 보여 주며 질문**)로 검색 결과에서 원본까지 내려갈 수 있게 했다. 텍스트로 한 번 접힌 표를 원본으로 되짚는 이 경로가 없으면 vision RAG는 그냥 OCR RAG다. 캐시가 지워졌으면 `ensure_page_image`가 즉석 렌더링한다.
 - **DPI 기본 150 + 긴 변 2000px.** 300 DPI 전면 페이지는 사내 게이트웨이 요청 크기 제한에 걸려 413이 났다(spec-reader 실측). 413이 나면 `--dpi`를 더 낮출 것. Pillow가 없으면 축소를 못 해 DPI로만 조절한다.
-- VLM 주소는 `RAG_VLM_URL`/`--vlm-url`. 기본값은 localhost지만 **사내 호스팅 게이트웨이 주소를 넣는 것이 정상 운용**이다(spec-reader `config.py`가 쓰는 그 주소).
+- VLM 주소는 **`mcp_server/local_settings.py`**에 적는다(`local_settings.example.py`를 복사). 우선순위는 **CLI > 환경변수 > 이 파일 > 기본값**이고 `settings.py`가 한 곳에서 읽는다. 이 파일이 필요한 진짜 이유는 편의가 아니라 **llm_studio가 자동으로 띄우는 rag_server에는 인자를 줄 수 없다는 것** — 없으면 `ask_page`가 기본값(localhost)을 보고 동작하지 않는다. 저장소가 공개라 사내 주소는 `.gitignore`로 빠지고 예시만 커밋한다(`install_requirements.bat`의 미러 주소, `spec-reader/config.py`와 같은 방침). `--vlm-url`은 `/v1`도 `/v1/chat/completions`도 받는다(`_base_url`) — spec-reader `config.py`가 후자라 그대로 붙여넣는 실수가 잦았다.
+- **VLM 연결 실패는 사유를 화면에 남긴다**(`vlm_check`). 사내망은 로그를 반출할 수 없어 화면 한 줄로 원인을 알아야 한다: HTTP 상태 해석(401 인증/404 경로/413 DPI), 프록시 환경변수 경고, 주소 표기 오류 지적. `/models`가 404여도 **실제 chat 요청으로 재확인**한다 — 게이트웨이가 `/models`를 안 열어도 전사는 되기 때문이다.
 
 ⚠ **치수를 RAG로 재지 말 것.** 이 경로로 넣은 치수표는 사람이 찾아보는 **참고용**이다. 판독값을 실제 부품 선정에 쓰려면 `spec-reader/read_spec.py` + `verify.py`(L−K_max 계열 상수 등 자동 검증)를 거쳐야 한다 — RAG는 청크 경계에서 숫자가 잘릴 수 있고 판독 검증이 없다. 같은 이유로 **엑셀 표준품 목록의 정확 조회는 `catalog.py`가 엑셀을 직접 읽어서** 한다. RAG에 넣은 엑셀 텍스트는 "이런 계열이 있더라"를 찾는 용도다. 이 분업(RAG=찾기 / 결정론적 함수=고르기)이 `spec-reader/CLAUDE.md`의 "VLM은 판독만, 선정 판단은 결정론적 함수로"와 같은 원칙이다.
 

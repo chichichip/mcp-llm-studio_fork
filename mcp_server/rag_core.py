@@ -61,6 +61,8 @@ except Exception as e:  # noqa: BLE001 — fastmcp/pywin32 부재 등 어떤 실
     OfficeError = RuntimeError  # type: ignore[assignment,misc]
     _document = None  # type: ignore[assignment]
 
+import settings
+
 try:
     import pythoncom  # COM 스레드 초기화용 (인덱싱 경로에서만 필요)
 except ImportError:
@@ -98,14 +100,16 @@ except ImportError as e:
 # (from-import로 값을 복사하면 덮어쓴 게 안 보인다).
 
 # 임베딩 서버 (llama-server --embeddings). /v1 까지 포함한 베이스 URL.
-EMBED_URL = os.getenv("RAG_EMBED_URL", "http://127.0.0.1:8001/v1")
+EMBED_URL = settings.get("RAG_EMBED_URL", "http://127.0.0.1:8001/v1")
 # 리랭커 서버 (llama-server --reranking, bge-reranker 등 GGUF). /v1 까지 포함한 베이스 URL.
 # 서버가 없거나 응답이 없으면 리랭크를 건너뛰고 RRF 순서를 그대로 쓴다(우아한 저하).
-RERANK_URL = os.getenv("RAG_RERANK_URL", "http://127.0.0.1:8002/v1")
+RERANK_URL = settings.get("RAG_RERANK_URL", "http://127.0.0.1:8002/v1")
 # 인덱스 파일 위치. 기본은 이 스크립트 옆.
-DB_PATH = os.getenv("RAG_DB", str(Path(__file__).with_name("rag_index.db")))
+DB_PATH = settings.get("RAG_DB_PATH", "") or settings.get(
+    "RAG_DB", str(Path(__file__).with_name("rag_index.db")))
 # Qdrant 로컬 모드 데이터 폴더 (qdrant-client 있을 때만 사용).
-QDRANT_PATH = os.getenv("RAG_QDRANT", str(Path(__file__).with_name("rag_vectors")))
+QDRANT_PATH = settings.get("RAG_QDRANT_PATH", "") or settings.get(
+    "RAG_QDRANT", str(Path(__file__).with_name("rag_vectors")))
 
 CHUNK_SIZE = 1000      # 청크 목표 길이(문자)
 CHUNK_OVERLAP = 200    # 청크 사이 겹침(문자)

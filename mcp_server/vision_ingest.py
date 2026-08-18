@@ -38,6 +38,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import settings
+
 try:
     import fitz  # PyMuPDF — PDF 렌더링/텍스트 레이어
 
@@ -66,19 +68,19 @@ except ImportError as e:
 #   - 로컬 llama-server (mmproj를 붙인 Gemma 3 등)
 #   - 사내 호스팅 게이트웨이(vLLM 등) — spec-reader/config.py가 쓰는 그 주소
 # 기본값은 localhost. 사내 주소는 RAG_VLM_URL 로 넘긴다.
-VLM_URL = os.getenv("RAG_VLM_URL", "http://127.0.0.1:8003/v1")
-VLM_MODEL = os.getenv("RAG_VLM_MODEL", "gemma")
-VLM_API_KEY = os.getenv("RAG_VLM_API_KEY", "")  # 사내 게이트웨이가 요구할 때만
-VLM_TIMEOUT = float(os.getenv("RAG_VLM_TIMEOUT", "180"))  # 한 페이지 전사 타임아웃(초)
-VLM_MAX_TOKENS = int(os.getenv("RAG_VLM_MAX_TOKENS", "4096"))
+VLM_URL = settings.get("RAG_VLM_URL", "http://127.0.0.1:8003/v1")
+VLM_MODEL = settings.get("RAG_VLM_MODEL", "gemma")
+VLM_API_KEY = settings.get("RAG_VLM_API_KEY", "")  # 사내 게이트웨이가 요구할 때만
+VLM_TIMEOUT = settings.get_float("RAG_VLM_TIMEOUT", 180)  # 한 페이지 전사 타임아웃(초)
+VLM_MAX_TOKENS = settings.get_int("RAG_VLM_MAX_TOKENS", 4096)
 
 # 렌더링. 300 DPI 전면 페이지는 사내 게이트웨이 요청 크기 제한에 걸려 413이 났다
 # (spec-reader 실측). 150 DPI + 긴 변 2000px이 판독과 크기의 타협점.
-VLM_DPI = int(os.getenv("RAG_VLM_DPI", "150"))
-VLM_MAX_SIDE = int(os.getenv("RAG_VLM_MAX_SIDE", "2000"))
+VLM_DPI = settings.get_int("RAG_VLM_DPI", 150)
+VLM_MAX_SIDE = settings.get_int("RAG_VLM_MAX_SIDE", 2000)
 
 # 페이지 이미지 캐시 폴더. 비우면 이미지를 저장하지 않는다(ask_page 되묻기 불가).
-PAGE_IMAGE_DIR = os.getenv("RAG_PAGE_IMAGES", str(Path(__file__).with_name("rag_pages")))
+PAGE_IMAGE_DIR = settings.get("RAG_PAGE_IMAGES", str(Path(__file__).with_name("rag_pages")))
 
 # 전사 결과가 이보다 짧으면 '판독 실패'로 보고 텍스트 레이어로 저하한다.
 MIN_TRANSCRIPT_CHARS = 20
@@ -433,8 +435,9 @@ def status_text() -> str:
     """VLM/렌더링 의존성 상태 한 덩어리 — rag_status와 인덱서가 함께 쓴다."""
     ok, why = vlm_check()
     lines = [
+        settings.status_line(),
         f"VLM 서버(모델 {VLM_MODEL}): {'연결됨' if ok else '연결 안 됨 — PDF는 텍스트 레이어로 저하'}",
-        f"  {why}",
+        f"  {why}  [주소 출처: {settings.source_of('RAG_VLM_URL')}]",
         f"PDF 렌더링(PyMuPDF): {'가능' if FITZ_AVAILABLE else '불가 — ' + FITZ_IMPORT_ERROR}",
         f"이미지 축소(Pillow): {'가능' if PIL_AVAILABLE else '불가 — ' + PIL_IMPORT_ERROR + ' (DPI로만 조절)'}",
         f"페이지 이미지 캐시: {PAGE_IMAGE_DIR or '사용 안 함 — ask_page 되묻기 불가'}",

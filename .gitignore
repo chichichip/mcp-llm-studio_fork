@@ -38,6 +38,9 @@ rag_vectors/
 # Vision RAG 페이지 이미지 캐시 (vision_ingest.py가 생성 — 용량이 크고 재생성 가능)
 rag_pages/
 
+# 사내 주소·계정을 담는 로컬 설정 (저장소는 공개다 — 예시만 커밋한다).
+mcp_server/local_settings.py
+
 # RAG 학습에 투입하는 실제 문서 (사내 문서일 수 있어 공개 repo에 넣지 않는다).
 # README만 남기고 나머지 전부 제외.
 rag_docs/*
