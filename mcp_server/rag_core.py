@@ -991,6 +991,30 @@ class RagStore:
                 return hit[:20]
         return []
 
+    def page_headings(self, path: str) -> list[dict]:
+        """한 파일의 쪽별 제목 목록 — 문서의 '목차'를 만드는 재료.
+
+        쪽마다 청크가 여럿일 수 있으므로 쪽 하나당 첫 제목만 남긴다. 쪽 개념이 없는
+        문서(Word/Excel 텍스트 경로)는 청크 순서대로 섹션 경로를 돌려준다.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT c.seq, c.page, c.heading, LENGTH(c.content) AS len FROM chunks c "
+                "JOIN files f ON f.id = c.file_id WHERE f.path = ? ORDER BY c.seq",
+                (path,),
+            ).fetchall()
+        out: list[dict] = []
+        seen_pages: set[int] = set()
+        for r in rows:
+            page = int(r["page"] or 0)
+            if page and page in seen_pages:
+                continue
+            if page:
+                seen_pages.add(page)
+            out.append({"page": page, "seq": r["seq"],
+                        "heading": r["heading"] or "", "len": r["len"]})
+        return out
+
     def page_chunks(self, path: str, page: int) -> list[dict]:
         """한 파일의 특정 쪽에 속한 청크들을 seq 순으로 (전사 원문 되읽기용)."""
         with self._lock:

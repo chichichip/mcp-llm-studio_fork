@@ -67,7 +67,7 @@ pywin32(COM)로 **이미 로그인·실행 중인** Office/Outlook을 직접 조
 - `rag_core.py` — 공용 코어(문서 읽기·청킹·임베딩·저장소). 실행 파일 아님. 설정(DB_PATH 등)은 CLI가 덮어쓰므로 다른 모듈에서는 `core.DB_PATH`처럼 **매번 속성으로** 읽는다(from-import 복사 금지).
 - `vision_ingest.py` — **PDF 인제스트**(페이지 이미지 → VLM 전사). 아래 'Vision RAG' 절. 서버 없이 `python mcp_server\vision_ingest.py --probe <PDF>`로 진단.
 - `rag_indexer.py` — **구성 CLI** (🟡 인덱싱 / 🔴 `--clear`는 `--yes` 없이 프리뷰만). `run_rag_indexer.bat`.
-- `rag_server.py` — **서빙 MCP** (🟢 search_docs/read_page/ask_page/rag_status **읽기 전용** — 모델이 인덱스를 못 건드린다). `run_rag_server.bat`, stdio 기본, http/sse는 :8090.
+- `rag_server.py` — **서빙 MCP** (🟢 search_docs/list_sections/read_page/ask_page/rag_status **읽기 전용** — 모델이 인덱스를 못 건드린다). `run_rag_server.bat`, stdio 기본, http/sse는 :8090.
 
 확장자→읽는 경로는 `DOC_KINDS` 한 곳에서 정한다: word=Word COM, excel=Excel COM, pdf=vision_ingest. 어느 경로든 결과는 **같은 모양의 청크 레코드**(`{heading, content, page, image}`)라 검색·임베딩은 원본 종류를 모른다 — 새 형식을 추가할 땐 `extract_chunks`에 분기 하나만 더하면 된다. 옛 `(heading, content)` 튜플도 `replace_file`이 받아 준다(하위 호환).
 
@@ -79,6 +79,7 @@ pywin32(COM)로 **이미 로그인·실행 중인** Office/Outlook을 직접 조
 - **임베딩은 llama-server `--embeddings`**(기본 `http://127.0.0.1:8001/v1`, EmbeddingGemma 등 GGUF를 CPU `-ngl 0` 상주 권장). **서버가 없으면 키워드 인덱스만 만들고 검색도 키워드 전용으로 우아하게 저하** — 나중에 서버를 켜고 `--reindex`로 돌리면 벡터가 붙는다. 이 저하 경로 덕에 임베딩 모델 반입 전에도 개발·검증이 가능하다.
 - 임베딩 모델을 바꿔 벡터 차원이 달라지면 Qdrant 컬렉션을 자동 재생성한다(stderr 경고) — 이후 전체 `--reindex` 필요.
 - 키워드 검색은 llm_studio `memory.py`와 같은 패턴(FTS5 trigram + 조사 제거 LIKE 저하)이다 — 한쪽 휴리스틱을 고치면 다른 쪽도 확인할 것.
+- **임베딩 서버가 없으면 낱말이 다를 때 아무것도 못 찾는다**(질문 '체결두께' ↔ 문서 '그립'). 키워드 기법으로는 메울 수 없는 간극이라, 그 사이의 통로로 `list_sections`(쪽별 제목 = 목차)를 둔다 — 모델이 목차에서 문서가 실제로 쓰는 용어를 확인하고 다시 검색한다. 검색 0건일 때 응답이 이 도구를 직접 가리킨다.
 
 #### Vision RAG — 표·도면이 많은 PDF (`vision_ingest.py`)
 

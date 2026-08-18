@@ -7,6 +7,8 @@ RAG **서빙** MCP 서버 — 읽기 전용(🟢). 인덱스 구성(인덱싱·�
 도구:
     search_docs — 하이브리드 검색(벡터+키워드, RRF 융합). 임베딩 서버가 없으면
                   키워드 전용으로 우아하게 저하한다.
+    list_sections — 문서의 목차(쪽별 제목). 질문의 낱말과 문서의 낱말이 다를 때,
+                  모델이 문서가 실제로 쓰는 용어를 찾아 다시 검색하게 하는 통로다.
     read_page   — 특정 문서 특정 쪽의 전사 원문을 그대로 읽는다(검색 요약 말고 원문).
     ask_page    — **그 쪽의 원본 이미지를 VLM에 다시 보여 주며** 되묻는다.
                   텍스트로 한 번 접힌 표·도면을 원본 그림으로 되짚는 경로다.
@@ -49,7 +51,9 @@ mcp = FastMCP(
         "관한 질문을 받으면 search_docs로 관련 대목을 찾아 근거로 답하세요(출처 "
         "파일명과 쪽 번호를 함께 알려주세요). 검색 결과가 표나 도면에서 잘려 보이면 "
         "read_page로 그 쪽 전문을 읽고, 그래도 확실하지 않으면 ask_page로 그 쪽 "
-        "그림을 직접 다시 보게 하세요. 인덱스가 비었거나 상태가 궁금하면 rag_status를 "
+        "그림을 직접 다시 보게 하세요. **검색이 아무것도 못 찾으면 낱말이 달라서일 수 "
+        "있습니다 — list_sections로 목차를 보고 문서가 실제로 쓰는 용어를 확인한 뒤 다시 "
+        "검색하세요.** 인덱스가 비었거나 상태가 궁금하면 rag_status를 "
         "먼저 호출하세요. 이 서버는 읽기 전용입니다 — 인덱스 구성(문서 추가/삭제)은 "
         "관리자가 rag_indexer CLI로 합니다. 치수·부품번호처럼 틀리면 안 되는 값은 "
         "검색 결과를 요약하지 말고 원문 그대로 인용하고, 근거가 없으면 모른다고 "
@@ -108,7 +112,12 @@ def search_docs(query: str, top_k: int = 5) -> str:
         for rank, (cid, _score) in enumerate(hits):
             fused[cid] = fused.get(cid, 0.0) + 1.0 / (RRF_K + rank + 1)
     if not fused:
-        return f"'{q}'와 관련된 내용을 찾지 못했습니다. 다른 표현으로 다시 시도해 보세요."
+        return (
+            f"'{q}'와 관련된 내용을 찾지 못했습니다.\n"
+            + ("문서가 다른 낱말을 쓰고 있을 수 있습니다(예: '체결두께' ↔ '그립'). "
+               "list_sections로 목차를 보고 문서가 실제로 쓰는 용어를 확인한 뒤 다시 "
+               "검색하세요." if not qv else "다른 표현으로 다시 시도해 보세요.")
+        )
 
     # 리랭크 후보: 융합 상위 N개(k보다 넉넉히)를 뽑아 본문을 가져온다. 리랭커가 있으면
     # 질의-청크 관련도로 재정렬하고, 없으면 RRF 순서를 그대로 쓴다(우아한 저하).
@@ -194,6 +203,49 @@ def _resolve_file(store, document: str) -> str:
         names = ", ".join(os.path.basename(f["path"]) for f in found[:8])
         raise RagError(f"'{document}'에 해당하는 문서가 여러 개입니다: {names}. 더 정확히 지정하세요.")
     return found[0]["path"]
+
+
+@mcp.tool()
+@rag_tool
+def list_sections(document: str = "") -> str:
+    """문서의 **목차**(쪽별 제목)를 훑습니다. 인자를 비우면 인덱싱된 문서 목록. (🟢 읽기)
+
+    search_docs는 글자가 겹쳐야 찾습니다(임베딩 서버가 없을 때). 그래서 사용자가 쓴
+    낱말과 문서에 적힌 낱말이 다르면 못 찾습니다 — 예: "체결두께"로 물었는데 문서에는
+    "그립"이라고 적혀 있는 경우.
+
+    **그럴 때 이 도구를 먼저 부르세요.** 목차에서 관련 있어 보이는 절을 고른 뒤,
+    그 절의 실제 낱말로 search_docs를 다시 하거나 read_page로 그 쪽을 바로 읽으면 됩니다.
+
+    Args:
+        document: 문서 이름(일부). 비우면 인덱싱된 문서 목록을 돌려줍니다.
+    """
+    store = core.get_store()
+    if not core._nfc(document):
+        files = store.all_files()
+        if not files:
+            return "인덱스가 비어 있습니다. rag_indexer.py로 문서를 먼저 인덱싱하세요."
+        out = ["인덱싱된 문서:"]
+        for f in files:
+            tag = f" [{f['source']}]" if f.get("source") else ""
+            out.append(f"  - {os.path.basename(f['path'])} (청크 {f['chunk_count']}개){tag}")
+        out.append("")
+        out.append('특정 문서의 목차를 보려면 list_sections(document="파일명")으로 부르세요.')
+        return "\n".join(out)
+
+    path = _resolve_file(store, document)
+    rows = store.page_headings(path)
+    if not rows:
+        raise RagError(f"'{os.path.basename(path)}'에 내용이 없습니다.")
+    out = [f"{os.path.basename(path)} — 목차 ({len(rows)}개 항목)", ""]
+    for r in rows:
+        head = r["heading"] or "(제목 없음)"
+        loc = f"{r['page']}쪽" if r["page"] else f"청크 {r['seq']}"
+        out.append(f"  {loc:>8}  {head}")
+    out.append("")
+    out.append("관심 있는 대목은 read_page로 원문을 읽고, 그 절의 낱말로 search_docs를 "
+               "다시 하면 관련 내용을 더 찾을 수 있습니다.")
+    return "\n".join(out)
 
 
 @mcp.tool()
