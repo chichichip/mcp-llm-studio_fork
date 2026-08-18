@@ -279,7 +279,7 @@ def _pdf_fallback_text(path: str) -> tuple[str, str]:
 
 def extract_pdf_pages(
     path: str, use_vlm: bool | None = None, dpi: int = 0, max_pages: int = 0,
-    image_key: str = "",
+    image_key: str = "", first_page: int = 1,
 ) -> tuple[list[dict], list[str]]:
     """PDF를 페이지 단위로 읽어 [{page, text, image, source}, ...] 와 알림 목록을 돌려준다.
 
@@ -288,6 +288,9 @@ def extract_pdf_pages(
 
     image_key: 페이지 이미지를 캐시할 때 쓸 키(기본은 path). Word를 임시 PDF로 내보내
     읽을 때 **원본 .docx 경로**를 넘겨 캐시가 원본에 붙게 한다.
+
+    first_page/max_pages: 읽을 구간(1-based, 앞 쪽부터가 기본). 진단할 때 특정 쪽만
+    보려고 있다 — VLM 전사는 쪽마다 돈이 드니 필요 없는 쪽을 읽지 않는다.
     """
     key = image_key or path
     notes: list[str] = []
@@ -324,10 +327,14 @@ def extract_pdf_pages(
             return [{"page": 0, "text": text, "image": "", "source": backend}], notes
 
         total = len(doc)
-        limit = min(total, max_pages) if max_pages else total
-        if limit < total:
-            notes.append(f"{total}쪽 중 앞 {limit}쪽만 인덱싱했습니다(max_pages).")
-        for pno in range(1, limit + 1):
+        start = max(1, first_page)
+        if start > total:
+            notes.append(f"{first_page}쪽은 이 문서에 없습니다(전체 {total}쪽).")
+            return [], notes
+        last = min(total, start + max_pages - 1) if max_pages else total
+        if (start, last) != (1, total):
+            notes.append(f"전체 {total}쪽 중 {start}~{last}쪽만 읽었습니다.")
+        for pno in range(start, last + 1):
             layer = ""
             try:
                 layer = (doc[pno - 1].get_text() or "").strip()
@@ -378,24 +385,25 @@ def status_text() -> str:
 # (pdf_server --probe, intranet_server --probe와 같은 규약).
 
 
-def _probe(path: str, page: int) -> int:
+def _probe(path: str, page: int, count: int) -> int:
+    """지정한 쪽만 판독해 결과를 보여 준다. 앞쪽을 훑지 않는다 — 전사는 쪽당 비용이다."""
     print(status_text(), file=sys.stderr)
     print("", file=sys.stderr)
     if not os.path.isfile(path):
         print(f"[오류] 파일이 없습니다: {path}", file=sys.stderr)
         return 1
-    pages, notes = extract_pdf_pages(path, max_pages=page)
+    pages, notes = extract_pdf_pages(path, first_page=page, max_pages=max(1, count))
     for n in notes:
         print(f"  알림: {n}", file=sys.stderr)
     if not pages:
         print("[실패] 본문을 얻지 못했습니다.", file=sys.stderr)
         return 1
-    last = pages[-1]
-    print(f"\n--- p{last['page']} ({last['source']}) "
-          f"{len(last['text'])}자 / 이미지 {last['image'] or '없음'} ---", file=sys.stderr)
-    print(last["text"][:2000])
-    if len(last["text"]) > 2000:
-        print("…(생략)")
+    for pg in pages:
+        print(f"\n--- p{pg['page']} ({pg['source']}) "
+              f"{len(pg['text'])}자 / 이미지 {pg['image'] or '없음'} ---", file=sys.stderr)
+        print(pg["text"][:3000])
+        if len(pg["text"]) > 3000:
+            print("…(생략)")
     return 0
 
 
@@ -406,7 +414,10 @@ if __name__ == "__main__":
         description="PDF 페이지 전사 진단 (MCP 서버 없이 백엔드만 확인)"
     )
     ap.add_argument("--probe", metavar="PDF", required=True, help="진단할 PDF 경로")
-    ap.add_argument("--page", type=int, default=1, help="이 쪽까지 읽어 마지막 쪽을 보여준다 (기본 1)")
+    ap.add_argument("--page", type=int, default=1,
+                    help="판독할 쪽 번호 (기본 1). 이 쪽만 읽는다 — 앞쪽은 건드리지 않는다.")
+    ap.add_argument("--count", type=int, default=1,
+                    help="이 쪽부터 몇 쪽을 읽을지 (기본 1)")
     ap.add_argument("--vlm-url", default=None, help=f"VLM 서버 /v1 (기본 {VLM_URL})")
     ap.add_argument("--vlm-model", default=None, help=f"VLM 모델 (기본 {VLM_MODEL})")
     ap.add_argument("--dpi", type=int, default=None, help=f"렌더링 DPI (기본 {VLM_DPI})")
@@ -417,4 +428,4 @@ if __name__ == "__main__":
         VLM_MODEL = a.vlm_model
     if a.dpi:
         VLM_DPI = a.dpi
-    sys.exit(_probe(a.probe, a.page))
+    sys.exit(_probe(a.probe, a.page, a.count))

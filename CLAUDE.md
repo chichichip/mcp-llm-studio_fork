@@ -200,7 +200,7 @@ python mcp_server\test_outlook.py                     # 읽기 전용 스모크 
 mcp_server\run_office_server.bat                      # 위 http 실행의 더블클릭용 (서버별, mcp_server 안)
 mcp_server\run_rag_indexer.bat ..\rag_docs            # RAG 인덱스 구성 (rag_docs 투입, 서빙은 내리고 실행)
 python mcp_server\rag_indexer.py C:\specs --vlm-url http://<사내VLM>/v1   # PDF를 VLM으로 전사해 인덱싱
-python mcp_server\vision_ingest.py --probe C:\specs\MS9555.pdf           # PDF 전사 백엔드 진단
+python mcp_server\vision_ingest.py --probe C:\specs\MS9555.pdf --page 3    # 그 쪽만 전사해 진단
 
 # 로컬 LLM
 python llm_studio\serve_llm.py --model C:/models/gemma-12b-it-qat.gguf
