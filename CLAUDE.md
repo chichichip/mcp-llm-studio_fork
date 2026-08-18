@@ -71,6 +71,8 @@ pywin32(COM)로 **이미 로그인·실행 중인** Office/Outlook을 직접 조
 
 확장자→읽는 경로는 `DOC_KINDS` 한 곳에서 정한다: word=Word COM, excel=Excel COM, pdf=vision_ingest. 어느 경로든 결과는 **같은 모양의 청크 레코드**(`{heading, content, page, image}`)라 검색·임베딩은 원본 종류를 모른다 — 새 형식을 추가할 땐 `extract_chunks`에 분기 하나만 더하면 된다. 옛 `(heading, content)` 튜플도 `replace_file`이 받아 준다(하위 호환).
 
+인덱스는 **원본 경로를 기억한다** — 검색·`read_page`는 저장된 전사문만 쓰므로 원본이 없어도 되지만, 재인덱싱과 `ask_page`의 이미지 재생성은 그 경로를 다시 본다. 문서는 한 폴더(예: `rag_docs/`)에 두고 옮기지 말 것. 폴더 정리(prune)는 **이번에 훑은 폴더 아래로 한정**한다(`remove_missing(under=)`) — 안 그러면 여러 폴더를 따로 인덱싱할 때 뒤에 돌린 폴더가 앞서 넣은 것을 통째로 지운다.
+
 저장: 청크 본문·키워드 인덱스는 sqlite(rag_index.db), 벡터는 **Qdrant 로컬(파일) 모드**(rag_vectors/ — 서버 프로세스 없음, qdrant-client는 사내 미러 등록됨). qdrant-client가 없으면 sqlite BLOB 벡터로 우아하게 저하한다. ⚠ Qdrant 로컬은 단일 프로세스 잠금 — **rag_indexer는 서빙이 잠금을 쥐고 있으면 시작을 거부한다(exit 2)**. 조용히 sqlite로 저하해 인덱싱하면 서빙과 다른 저장소에 벡터가 쌓여 검색이 어긋나기 때문이다. 인덱싱할 때는 서빙을 잠시 내릴 것. llm_studio는 `docs`라는 이름으로 rag_server를 **자동 등록**한다(도구는 `docs__search_docs` 등) — 앱이 떠 있는 동안 잠금을 쥐므로 인덱싱하려면 앱을 끄거나 설정에서 `docs`를 꺼야 한다.
 
 - **문서 읽기는 office_server의 `_document`를 import해 재사용**한다 — Word COM이 여는 것이라 사내 DRM 문서도 읽힌다. 같은 제약(사용자 세션, Windows+Office)을 물려받는다.

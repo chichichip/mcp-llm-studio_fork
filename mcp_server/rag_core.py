@@ -860,13 +860,27 @@ class RagStore:
                 self.vec.upsert(new_ids, vectors)
         return len(records)
 
-    def remove_missing(self, existing_paths: set[str]) -> int:
-        """디스크에서 사라진 파일의 인덱스를 정리한다. 반환: 삭제한 파일 수."""
+    def remove_missing(self, existing_paths: set[str], under: str = "") -> int:
+        """디스크에서 사라진 파일의 인덱스를 정리한다. 반환: 삭제한 파일 수.
+
+        under: 이 폴더 **아래에 있는 항목만** 정리 대상으로 본다. 지정하지 않으면
+        인덱스 전체가 대상이다.
+
+        ⚠ under가 왜 필요한가: 여러 폴더를 따로 인덱싱하는 운용에서(지침서 폴더,
+        스펙 폴더, 목록 폴더를 각각) under가 없으면 **뒤에 돌린 폴더가 앞서 넣은
+        폴더를 통째로 지운다** — 그 파일들이 이번 목록에 없다는 이유로. 정리 범위를
+        이번에 훑은 폴더로 한정해야 한다.
+        """
+        root = os.path.normcase(os.path.abspath(under)) + os.sep if under else ""
         gone_chunk_ids: list[int] = []
         with self._lock:
             self.conn.execute("PRAGMA foreign_keys = ON")
             rows = self.conn.execute("SELECT id, path FROM files").fetchall()
-            gone = [r for r in rows if r["path"] not in existing_paths]
+            gone = [
+                r for r in rows
+                if r["path"] not in existing_paths
+                and (not root or os.path.normcase(r["path"]).startswith(root))
+            ]
             for r in gone:
                 gone_chunk_ids.extend(
                     int(c["id"]) for c in self.conn.execute(

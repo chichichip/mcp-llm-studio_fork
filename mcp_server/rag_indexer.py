@@ -139,7 +139,10 @@ def index_folder(folder: str, reindex: bool = False, prune: bool = True,
         except Exception as e:  # noqa: BLE001 — 한 파일 실패가 전체를 멈추지 않게
             failed += 1
             results.append(f"  ✗ {os.path.basename(path)}: {type(e).__name__}: {e}")
-    pruned = store.remove_missing({os.path.abspath(f) for f in files}) if prune else 0
+    # 정리는 **이번에 훑은 폴더 안**으로 한정한다 — 다른 폴더를 따로 인덱싱해 둔
+    # 것을 이번 실행이 지우면 안 된다.
+    pruned = (store.remove_missing({os.path.abspath(f) for f in files}, under=root)
+              if prune else 0)
 
     s = store.stats()
     head = [
