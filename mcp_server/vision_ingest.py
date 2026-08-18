@@ -115,15 +115,76 @@ def _headers() -> dict:
     return h
 
 
-def vlm_available() -> bool:
-    """VLM 서버가 응답하는지 /models 로 확인한다. 어떤 실패든 False (저하 신호)."""
-    url = VLM_URL.rstrip("/") + "/models"
-    req = urllib.request.Request(url, headers=_headers(), method="GET")
+def _base_url() -> str:
+    """VLM_URL을 `.../v1` 형태의 베이스로 정규화한다.
+
+    spec-reader의 config.py는 `http://<사내주소>/v1/chat/completions` 처럼 **엔드포인트
+    전체 주소**를 쓴다. 그 값을 그대로 --vlm-url에 붙여넣는 실수가 잦은데, 그러면
+    `.../chat/completions/models`를 부르게 돼 연결 실패로 보인다. 끝에 붙은 엔드포인트
+    경로를 떼어 양쪽 표기를 모두 받아 준다.
+    """
+    u = VLM_URL.strip().rstrip("/")
+    for suffix in ("/chat/completions", "/completions", "/embeddings", "/models"):
+        if u.endswith(suffix):
+            u = u[: -len(suffix)]
+            break
+    return u
+
+
+def _ping(url: str, payload: dict | None) -> tuple[bool, str]:
+    """엔드포인트 하나를 찔러 (성공여부, 사유)를 돌려준다. 사유는 사람이 읽을 한 줄."""
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(
+        url, data=data, headers=_headers(), method="POST" if data else "GET"
+    )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status == 200
-    except Exception:  # noqa: BLE001 — 연결 실패/404/인증 등 무엇이든 '없음'으로 본다
-        return False
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return (resp.status == 200), f"HTTP {resp.status}"
+    except urllib.error.HTTPError as e:
+        hint = {401: " (인증 필요 — RAG_VLM_API_KEY)", 403: " (권한 거부)",
+                404: " (이 경로 없음)", 413: " (요청이 너무 큼 — --dpi를 낮출 것)"}.get(e.code, "")
+        return False, f"HTTP {e.code}{hint}"
+    except urllib.error.URLError as e:
+        return False, f"연결 불가: {e.reason}"
+    except Exception as e:  # noqa: BLE001
+        return False, f"{type(e).__name__}: {e}"
+
+
+def vlm_check() -> tuple[bool, str]:
+    """VLM 서버가 쓸 수 있는지 확인하고 **사유까지** 돌려준다.
+
+    사내망에서는 로그 파일을 빼낼 수 없어 화면에 뜬 한 줄로 원인을 알아야 한다.
+    그래서 실패를 조용히 삼키지 않고 어디서 어떻게 막혔는지 남긴다.
+
+    /models 를 먼저 보고, 없으면(게이트웨이가 안 여는 경우가 있다) **실제 chat 요청**
+    으로 확정한다 — /models 가 없다고 전사까지 못 하는 건 아니기 때문이다.
+    """
+    base = _base_url()
+    ok, why = _ping(base + "/models", None)
+    if ok:
+        return True, f"{base} 연결됨"
+    # 게이트웨이가 /models를 안 열 수 있다. 아주 작은 chat 요청으로 확정한다.
+    ok2, why2 = _ping(
+        base + "/chat/completions",
+        {"model": VLM_MODEL, "messages": [{"role": "user", "content": "ping"}],
+         "max_tokens": 1, "temperature": 0},
+    )
+    if ok2:
+        return True, f"{base} 연결됨 (/models는 없지만 chat은 응답)"
+
+    reason = f"{base} 연결 실패 — /models: {why} / chat: {why2}"
+    proxies = urllib.request.getproxies()
+    if proxies:
+        reason += (f"\n    ⚠ 프록시 설정이 잡혀 있습니다({', '.join(sorted(proxies))}). "
+                   "사내 주소가 프록시로 나가면 막힙니다 — NO_PROXY에 이 호스트를 넣어 보세요.")
+    if VLM_URL.rstrip("/").endswith(("chat/completions", "completions")):
+        reason += "\n    ⚠ --vlm-url 에는 `/v1` 까지만 주세요(`/chat/completions` 는 코드가 붙입니다)."
+    return False, reason
+
+
+def vlm_available() -> bool:
+    """VLM 서버가 응답하는지 (사유 없이). 저하 판정용."""
+    return vlm_check()[0]
 
 
 def ask_image(png_bytes: bytes, prompt: str) -> str | None:
@@ -150,7 +211,7 @@ def ask_image(png_bytes: bytes, prompt: str) -> str | None:
         }
     ).encode("utf-8")
     req = urllib.request.Request(
-        VLM_URL.rstrip("/") + "/chat/completions", data=body,
+        _base_url() + "/chat/completions", data=body,
         headers=_headers(), method="POST",
     )
     try:
@@ -370,9 +431,10 @@ def extract_pdf_pages(
 
 def status_text() -> str:
     """VLM/렌더링 의존성 상태 한 덩어리 — rag_status와 인덱서가 함께 쓴다."""
+    ok, why = vlm_check()
     lines = [
-        f"VLM 서버({VLM_URL}, 모델 {VLM_MODEL}): "
-        + ("연결됨" if vlm_available() else "연결 안 됨 — PDF는 텍스트 레이어로 저하"),
+        f"VLM 서버(모델 {VLM_MODEL}): {'연결됨' if ok else '연결 안 됨 — PDF는 텍스트 레이어로 저하'}",
+        f"  {why}",
         f"PDF 렌더링(PyMuPDF): {'가능' if FITZ_AVAILABLE else '불가 — ' + FITZ_IMPORT_ERROR}",
         f"이미지 축소(Pillow): {'가능' if PIL_AVAILABLE else '불가 — ' + PIL_IMPORT_ERROR + ' (DPI로만 조절)'}",
         f"페이지 이미지 캐시: {PAGE_IMAGE_DIR or '사용 안 함 — ask_page 되묻기 불가'}",
