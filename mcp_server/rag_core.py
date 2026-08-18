@@ -925,10 +925,25 @@ class RagStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def find_file(self, needle: str) -> list[dict]:
-        """경로/파일명 조각으로 인덱싱된 파일을 찾는다(ask_page 등이 쓰는 느슨한 조회).
+    _FILE_COLS = "SELECT path, kind, source, chunk_count FROM files"
 
-        정확한 절대경로를 먼저 보고, 없으면 파일명에 조각이 들어가는 것을 모은다.
+    def all_files(self) -> list[dict]:
+        with self._lock:
+            return [dict(r) for r in
+                    self.conn.execute(self._FILE_COLS + " ORDER BY path").fetchall()]
+
+    def find_file(self, needle: str) -> list[dict]:
+        """문서 이름 조각으로 인덱싱된 파일을 찾는다(read_page/ask_page가 쓰는 느슨한 조회).
+
+        모델은 search_docs 결과에 찍힌 **파일명**을 그대로 넘기는데, 거기에 섹션 경로나
+        쪽 표기를 붙여 보내거나 공백·대소문자가 흔들리는 일이 잦다. 그때마다 "못 찾음"으로
+        끝나면 모델이 원문을 못 읽는다 — 그래서 단계적으로 느슨하게 찾는다:
+
+            ① 절대경로 정확 일치
+            ② 파일명 정확 일치 (대소문자·공백 무시)
+            ③ 파일명에 조각이 들어감 / 조각 안에 파일명이 들어감
+            ④ 전체 경로에 조각이 들어감
+
         여럿이면 그대로 돌려준다 — 호출부가 '어느 걸 말하는지' 되묻게 하기 위해서다.
         """
         n = _nfc(needle)
@@ -936,17 +951,31 @@ class RagStore:
             return []
         with self._lock:
             exact = self.conn.execute(
-                "SELECT path, kind, source, chunk_count FROM files WHERE path = ?",
+                self._FILE_COLS + " WHERE path = ?",
                 (os.path.abspath(os.path.expanduser(n)),),
             ).fetchall()
             if exact:
                 return [dict(r) for r in exact]
-            rows = self.conn.execute(
-                "SELECT path, kind, source, chunk_count FROM files "
-                "WHERE path LIKE ? ORDER BY path LIMIT 20",
-                (f"%{n}%",),
-            ).fetchall()
-        return [dict(r) for r in rows]
+            rows = [dict(r) for r in self.conn.execute(self._FILE_COLS).fetchall()]
+
+        def key(t: str) -> str:
+            # 비교용 키 — 공백을 없애고 소문자로. (spec-reader catalog.norm과 같은 방침)
+            return re.sub(r"\s+", "", _nfc(t)).lower()
+
+        nk = key(n)
+        base = {r["path"]: key(os.path.basename(r["path"])) for r in rows}
+        stem = {p: b.rsplit(".", 1)[0] if "." in b else b for p, b in base.items()}
+
+        for pick in (
+            lambda r: base[r["path"]] == nk or stem[r["path"]] == nk,
+            lambda r: base[r["path"]] in nk or stem[r["path"]] in nk,
+            lambda r: nk in base[r["path"]],
+            lambda r: nk in key(r["path"]),
+        ):
+            hit = [r for r in rows if pick(r)]
+            if hit:
+                return hit[:20]
+        return []
 
     def page_chunks(self, path: str, page: int) -> list[dict]:
         """한 파일의 특정 쪽에 속한 청크들을 seq 순으로 (전사 원문 되읽기용)."""

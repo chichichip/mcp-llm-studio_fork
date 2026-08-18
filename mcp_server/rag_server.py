@@ -150,12 +150,19 @@ def search_docs(query: str, top_k: int = 5) -> str:
 
 
 def _cite(c: dict) -> str:
-    """출처 한 줄 — 파일명 › 섹션 (쪽/청크). 쪽이 있으면 read_page/ask_page의 열쇠가 된다."""
+    """출처 한 줄 — 파일명 › 섹션 (쪽/청크).
+
+    쪽이 있으면 read_page/ask_page를 **어떤 인자로 부르면 되는지까지** 적어 준다.
+    모델이 인자를 지어내다 "문서를 못 찾음"으로 막히는 걸 줄이기 위한 것이다.
+    """
+    name = os.path.basename(c["path"])
     heading = c.get("heading")
     loc = f" › {heading}" if heading else ""
     page = int(c.get("page") or 0)
-    where = f"{page}쪽, 청크 {c['seq']}" if page else f"청크 {c['seq']}"
-    return f"{os.path.basename(c['path'])}{loc} ({where})"
+    if page:
+        return (f"{name}{loc} ({page}쪽)"
+                f"  → 원문: read_page(document=\"{name}\", page={page})")
+    return f"{name}{loc} (청크 {c['seq']})"
 
 
 # ─────────────────────────────── 쪽 단위 되읽기 ───────────────────────────────
@@ -164,12 +171,24 @@ def _cite(c: dict) -> str:
 
 
 def _resolve_file(store, document: str) -> str:
-    """문서 이름 조각을 인덱싱된 절대경로 하나로 좁힌다. 애매하면 RagError로 되묻는다."""
+    """문서 이름 조각을 인덱싱된 절대경로 하나로 좁힌다.
+
+    못 찾으면 **인덱스에 실제로 뭐가 있는지 목록을 함께** 돌려준다. 모델은 이 응답만
+    보고 다시 시도하므로, 목록이 없으면 "못 찾았다"에서 대화가 끝난다.
+    """
     found = store.find_file(document)
     if not found:
+        names = [os.path.basename(f["path"]) for f in store.all_files()]
+        if not names:
+            raise RagError(
+                "인덱스가 비어 있습니다. rag_indexer.py로 문서를 먼저 인덱싱하세요."
+            )
+        listed = "\n".join(f"  - {n}" for n in names[:15])
+        more = f"\n  … 외 {len(names) - 15}개" if len(names) > 15 else ""
         raise RagError(
-            f"'{document}' 문서를 인덱스에서 찾지 못했습니다. rag_status로 인덱싱된 "
-            "파일 목록을 확인하거나 파일명을 더 정확히 지정하세요."
+            f"'{document}' 문서를 인덱스에서 찾지 못했습니다.\n"
+            f"인덱싱된 문서는 다음과 같습니다 — 이 중 하나의 이름을 그대로 쓰세요:\n"
+            f"{listed}{more}"
         )
     if len(found) > 1:
         names = ", ".join(os.path.basename(f["path"]) for f in found[:8])
