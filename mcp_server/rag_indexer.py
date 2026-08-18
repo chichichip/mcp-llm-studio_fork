@@ -113,6 +113,7 @@ def index_folder(folder: str, reindex: bool = False, prune: bool = True,
     if any(core.doc_kind(f) in ("word", "excel") for f in files):
         core._require_word()
 
+    _preflight_vision(files, word_vision)
     store = core.get_store()
     embed_ok = core._embed_available()
     needs_vlm = any(core.doc_kind(f) == "pdf" for f in files) or (
@@ -170,10 +171,37 @@ def index_file(path: str, password: str = "", use_vlm: bool | None = None,
         )
     if kind in ("word", "excel"):
         core._require_word()
+    _preflight_vision([p], word_vision)
     store = core.get_store()
     note = _index_one_file(store, p, password, reindex=True, use_embed=None,
                            use_vlm=use_vlm, word_vision=word_vision)
     return f"인덱싱 완료: {os.path.basename(p)} — {note}"
+
+
+def _preflight_vision(files: list[str], word_vision: bool) -> None:
+    """Vision 경로를 쓰겠다고 했는데 못 쓰는 상태면 **시작 전에** 크게 알린다.
+
+    저하 자체는 설계대로지만, "인덱싱 완료"만 보고 표·그림이 들어간 줄 알면 안 된다.
+    끝나고 나오는 알림 한 줄로는 놓치기 쉬워서 앞에서 한 번 더 짚는다.
+    """
+    wants = [f for f in files
+             if core.doc_kind(f) == "pdf" or (word_vision and core.doc_kind(f) == "word")]
+    if not wants:
+        return
+    vi = core.vision_ingest
+    if vi is None:
+        print(f"[경고] Vision 경로를 쓸 수 없습니다: {core.VISION_IMPORT_ERROR}", file=sys.stderr)
+        return
+    if not vi.FITZ_AVAILABLE:
+        print(
+            f"[경고] PyMuPDF가 없어({vi.FITZ_IMPORT_ERROR}) **쪽 이미지를 만들 수 없습니다**.\n"
+            f"        {len(wants)}개 파일이 텍스트 추출로 저하됩니다 — 표·그림은 들어가지 않고\n"
+            "        쪽 번호와 ask_page 되짚기도 안 됩니다.\n"
+            "        지금 쓰는 파이썬에 설치하세요:\n"
+            "          venv\\Scripts\\python.exe -m pip install --no-index "
+            "--find-links wheelhouse PyMuPDF Pillow",
+            file=sys.stderr,
+        )
 
 
 def _require_qdrant_or_exit(store: RagStore) -> None:
@@ -281,6 +309,9 @@ def main() -> None:
         print(f"[오류] {e}", file=sys.stderr)
         sys.exit(1)
     finally:
+        # Qdrant 로컬 저장소를 명시적으로 닫는다. 안 닫으면 인터프리터가 내려간 뒤 GC가
+        # 소멸자를 불러 `sys.meta_path is None`이 뜨고, 그 시점엔 flush 보장이 없다.
+        core.close_store()
         if core.pythoncom is not None:
             core.pythoncom.CoUninitialize()
 

@@ -31,6 +31,7 @@ RAG 공용 코어 — 구성(rag_indexer.py)과 서빙(rag_server.py)이 함께 
 
 from __future__ import annotations
 
+import atexit
 import json
 import math
 import os
@@ -694,6 +695,18 @@ class _QdrantVectors:
         except Exception:  # noqa: BLE001 — 컬렉션이 없으면 그만
             pass
 
+    def close(self) -> None:
+        """로컬 저장소를 닫고 잠금을 놓는다.
+
+        명시적으로 닫지 않으면 인터프리터 종료 중 GC가 QdrantClient의 소멸자를 부르는데,
+        그때는 이미 import 시스템이 내려가 `sys.meta_path is None` 오류가 난다. 오류
+        자체보다 **그 시점에 flush가 끝났다는 보장이 없는 것**이 문제다.
+        """
+        try:
+            self.client.close()
+        except Exception:  # noqa: BLE001 — 닫기 실패가 작업 결과를 뒤집지 않게
+            pass
+
 
 class RagStore:
     """인덱스 sqlite 파일 하나(+ 선택적 Qdrant 벡터 폴더)를 관리한다. 스레드 안전."""
@@ -721,6 +734,16 @@ class RagStore:
     @property
     def vec_kind(self) -> str:
         return "qdrant" if self.vec is not None else "sqlite"
+
+    def close(self) -> None:
+        """벡터 백엔드와 sqlite 연결을 정리한다. 여러 번 불러도 안전."""
+        vec, self.vec = self.vec, None
+        if vec is not None:
+            vec.close()
+        try:
+            self.conn.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _init_schema(self) -> None:
         with self._lock:
@@ -1052,8 +1075,27 @@ def get_store() -> RagStore:
     global _store
     with _store_lock:
         if _store is None or _store.path != DB_PATH or _store.qdrant_path != QDRANT_PATH:
+            if _store is not None:
+                _store.close()  # 옛 저장소가 Qdrant 잠금을 쥔 채 남지 않게
             _store = RagStore(DB_PATH, QDRANT_PATH)
         return _store
+
+
+def close_store() -> None:
+    """열려 있는 저장소를 닫는다. CLI가 끝날 때 부르고, 못 부른 경우를 대비해 atexit에도 건다.
+
+    인터프리터가 다 내려간 뒤 GC가 QdrantClient 소멸자를 부르면
+    `sys.meta_path is None ... Python is likely shutting down`이 뜬다. atexit은 아직
+    import 시스템이 살아 있을 때 도므로 그 창을 놓치지 않는다.
+    """
+    global _store
+    with _store_lock:
+        if _store is not None:
+            _store.close()
+            _store = None
+
+
+atexit.register(close_store)
 
 
 # ─────────────────────────────── 상태 요약 (양쪽 공용) ───────────────────────────────
