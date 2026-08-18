@@ -27,10 +27,27 @@ RAG_VLM_API_KEY = ""
 RAG_VLM_DPI = "150"
 
 # ─────────────────────────── 임베딩 / 리랭커 (의미 검색) ───────────────────────────
-# 없으면 키워드 검색만으로 우아하게 저하한다 — 비워 둬도 RAG는 동작한다.
+# 없으면 키워드 검색만으로 우아하게 저하한다 — 비워 둬도 RAG는 동작하지만, 질문과
+# 문서의 낱말이 다르면 못 찾는다("체결두께" ↔ "그립").
 # 사내 게이트웨이가 임베딩도 서빙한다면 VLM과 같은 주소를 적으면 된다.
 RAG_EMBED_URL = "http://127.0.0.1:8001/v1"
 RAG_RERANK_URL = "http://127.0.0.1:8002/v1"
+
+# ⚠ 임베딩 모델마다 **질의/문서에 붙이는 프리픽스 형식이 다르다.** 안 맞으면 오류 없이
+#    검색 품질만 조용히 떨어진다. 쓰는 모델에 맞춰 아래 둘을 고칠 것.
+#
+#   EmbeddingGemma (기본값 — 아무것도 안 적으면 이 형식):
+#       RAG_EMBED_QUERY_PREFIX = "task: search result | query: "
+#       RAG_EMBED_DOC_TEMPLATE = "title: {title} | text: {text}"
+#   bge-m3 / bge-large (프리픽스 없음):
+#       RAG_EMBED_QUERY_PREFIX = ""
+#       RAG_EMBED_DOC_TEMPLATE = "{text}"
+#   multilingual-e5:
+#       RAG_EMBED_QUERY_PREFIX = "query: "
+#       RAG_EMBED_DOC_TEMPLATE = "passage: {text}"
+#
+# RAG_EMBED_QUERY_PREFIX = ""
+# RAG_EMBED_DOC_TEMPLATE = "{text}"
 
 # ─────────────────────────── 인덱스 저장 위치 (보통 그대로 둔다) ───────────────────────────
 # RAG_DB_PATH = r"C:\ProgramData\LocalLLMStudio\rag_index.db"

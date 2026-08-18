@@ -20,6 +20,7 @@ Word/Excel은 COM으로, **PDF는 페이지 이미지 → VLM 전사(Vision RAG)
     python rag_indexer.py C:\specs --vlm-url http://<사내VLM>/v1 --vlm-model gemma-3-27b
     python rag_indexer.py C:\docs --no-vlm      # PDF도 텍스트 레이어만 (VLM 없이 뼈대부터)
     python rag_indexer.py C:\guide --word-vision  # Word 지침서도 표·그림째로 (PDF 변환 후 전사)
+    python rag_indexer.py --embed-only          # 벡터만 다시 (전사 안 함 — 임베딩 서버 확보 후)
     python rag_indexer.py --status              # 인덱스 상태 확인
     python rag_indexer.py --clear               # 삭제 프리뷰 (실행 안 함)
     python rag_indexer.py --clear --yes         # 인덱스 전체 삭제
@@ -207,6 +208,46 @@ def _preflight_vision(files: list[str], word_vision: bool) -> None:
         )
 
 
+def embed_only() -> str:
+    """이미 저장된 청크에 **벡터만** 다시 붙인다. 원본 문서는 열지 않는다.
+
+    임베딩 서버를 나중에 확보했을 때 쓰는 경로다. 전체 재인덱싱은 PDF/Word를 VLM으로
+    다시 전사하므로(쪽당 수 초) 이미 끝낸 판독을 통째로 버리게 된다 — 그게 아까워서
+    벡터 생성만 떼어 놓았다. 청크·쪽·이미지는 그대로 두고 벡터만 갈아 끼운다.
+    """
+    if not core._embed_available():
+        raise RagError(
+            f"임베딩 서버에 연결하지 못했습니다({core.EMBED_URL}). "
+            "llama-server --embeddings 를 띄웠는지, local_settings.py의 "
+            "RAG_EMBED_URL 이 맞는지 확인하세요."
+        )
+    store = core.get_store()
+    chunks = store.all_chunks()
+    if not chunks:
+        return "인덱스가 비어 있습니다. 먼저 문서를 인덱싱하세요."
+
+    texts = [core._embed_doc_text(c["content"], c["heading"] or "") for c in chunks]
+    ids = [int(c["id"]) for c in chunks]
+    done = 0
+    start = time.time()
+    for i in range(0, len(texts), EMBED_BATCH):
+        batch = core._embed_texts(texts[i:i + EMBED_BATCH])
+        if batch is None:
+            return (f"임베딩 도중 서버 응답이 끊겼습니다. {done}개까지 붙였습니다 — "
+                    "서버를 확인하고 다시 실행하면 이어서(전체 다시) 진행합니다.")
+        done += store.set_vectors(ids[i:i + len(batch)], batch)
+        print(f"  임베딩 {done}/{len(ids)}", end="\r", file=sys.stderr)
+    print("", file=sys.stderr)
+
+    s = store.stats()
+    return (
+        f"벡터 생성 완료 ({time.time() - start:.1f}초) — 문서는 다시 읽지 않았습니다.\n"
+        f"  청크 {done}개에 벡터를 붙였습니다.\n"
+        f"  누적: 파일 {s['files']}개, 청크 {s['chunks']}개 (벡터 {s['with_vector']}개)\n"
+        f"  임베딩 서버: {core.EMBED_URL}"
+    )
+
+
 def _require_qdrant_or_exit(store: RagStore) -> None:
     """qdrant-client가 있는데 백엔드를 못 열었다면(대개 서빙이 잠금 보유) 중단한다.
 
@@ -237,6 +278,9 @@ def main() -> None:
     parser.add_argument("--no-prune", action="store_true", help="사라진 파일을 인덱스에서 정리하지 않음")
     parser.add_argument("--password", default="", help="문서 공통 열기 암호")
     parser.add_argument("--status", action="store_true", help="인덱스 상태만 출력하고 종료")
+    parser.add_argument("--embed-only", action="store_true",
+                        help="이미 인덱싱된 청크에 벡터만 다시 붙인다 (문서를 다시 읽지 않음 — "
+                             "임베딩 서버를 나중에 확보했을 때)")
     parser.add_argument("--clear", action="store_true", help="인덱스 전체 삭제 (--yes 없으면 프리뷰만)")
     parser.add_argument("--yes", action="store_true", help="--clear를 실제로 실행")
     parser.add_argument("--db", default=None, help=f"인덱스 파일 경로 (기본 {core.DB_PATH})")
@@ -276,6 +320,11 @@ def main() -> None:
     try:
         if args.status:
             print(core.status_text())
+            return
+
+        if args.embed_only:
+            _require_qdrant_or_exit(core.get_store())
+            print(embed_only())
             return
 
         if args.clear:

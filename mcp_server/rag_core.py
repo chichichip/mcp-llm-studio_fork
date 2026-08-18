@@ -134,8 +134,8 @@ RRF_K = 60                        # RRF 상수 (관례값)
 # 붙여야 검색 품질이 제대로 나온다(안 붙이면 같은 모델인데 recall이 떨어짐). 다른 모델로
 # 바꾸면 이 두 값을 그 모델 포맷으로 교체할 것 — E5: "query: "/"passage: ", BGE-m3: 프리픽스
 # 없음. 빈 문자열/템플릿로 두면 프리픽스 없이(raw) 임베딩한다.
-EMBED_QUERY_PREFIX = os.getenv("RAG_EMBED_QUERY_PREFIX", "task: search result | query: ")
-EMBED_DOC_TEMPLATE = os.getenv("RAG_EMBED_DOC_TEMPLATE", "title: {title} | text: {text}")
+EMBED_QUERY_PREFIX = settings.get("RAG_EMBED_QUERY_PREFIX", "task: search result | query: ")
+EMBED_DOC_TEMPLATE = settings.get("RAG_EMBED_DOC_TEMPLATE", "title: {title} | text: {text}")
 
 # 검색 결과에 붙일 이웃 청크 수(같은 섹션 한정, 앞뒤 각각). 0이면 매칭 청크만. 근거가
 # 청크 경계에서 잘리는 걸 막는 small-to-big 확장이다.
@@ -990,6 +990,34 @@ class RagStore:
             if hit:
                 return hit[:20]
         return []
+
+    def all_chunks(self) -> list[dict]:
+        """인덱스의 모든 청크 (id, heading, content) — 벡터만 다시 만들 때 쓴다."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT id, heading, content FROM chunks ORDER BY id"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_vectors(self, ids: list[int], vecs: list[list[float]]) -> int:
+        """이미 저장된 청크들에 벡터를 붙인다(문서는 다시 읽지 않는다). 반환: 붙인 개수.
+
+        임베딩 서버를 나중에 확보했을 때 **전사를 다시 하지 않고** 벡터만 채우기 위한
+        경로다(rag_indexer --embed-only). VLM 전사는 쪽당 비용이 커서 버리면 아깝다.
+        """
+        if not ids:
+            return 0
+        if self.vec is not None:
+            self.vec.upsert(ids, vecs)
+        else:
+            with self._lock:
+                self.conn.executemany(
+                    "UPDATE chunks SET embedding = ? WHERE id = ?",
+                    [(_pack_vec(v), i) for i, v in zip(ids, vecs)],
+                )
+                self.conn.commit()
+                self._generation += 1  # sqlite 벡터 캐시 무효화
+        return len(ids)
 
     def page_headings(self, path: str) -> list[dict]:
         """한 파일의 쪽별 제목 목록 — 문서의 '목차'를 만드는 재료.
