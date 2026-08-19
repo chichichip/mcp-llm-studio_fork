@@ -54,6 +54,41 @@ except Exception as e:  # noqa: BLE001
     _verify = None  # type: ignore[assignment]
     SR_IMPORT_ERROR = str(e)
 
+# 도면 그림의 치수 기호 범례를 읽는 프롬프트.
+#
+# ★ 이게 왜 필요한가: 표 헤더에는 알파벳(H, K, L, T…)만 있고 **그게 무슨 치수인지는
+#   도면 그림의 지시선에만** 있다. 모델이 'H니까 Height겠지'라고 추측하면 엉뚱한
+#   컬럼으로 걸러 잘못된 부품이 나오고 아무도 못 알아챈다 — 되돌릴 수 없는 실패다.
+#   그래서 **추측 대신 그림을 읽는다.** 이건 판단이 아니라 판독이라 VLM이 할 일이다.
+#   모르는 기호는 지어내지 말고 빼라고 명시한다(빠진 건 사람이 채우면 되지만,
+#   틀린 건 아무도 모른다).
+LEGEND_PROMPT = """You are reading an aerospace fastener standard drawing (MS / AS / NAS).
+
+Do NOT read the dimension table values. Instead look at the DRAWING FIGURE and find the
+dimension letters (A, B, C, D, H, K, L, T, W, ...) that label dimensions with leader lines
+or dimension lines. For each letter, describe WHAT PART of the geometry it measures.
+
+Be specific about the feature and the direction:
+- "head diameter (across flats)" vs "head diameter (across corners)" vs "head height"
+- "overall length under head" vs "overall length including head"
+- "grip length" vs "thread length"
+
+Rules:
+- Report ONLY letters you can actually see labelling a dimension in the figure.
+- If you cannot tell what a letter measures, OMIT it. Do NOT guess.
+- Also give a short Korean description for each, so a Korean engineer can match it.
+
+Return ONLY a JSON object, no markdown fences, no commentary:
+
+{
+  "legend": {
+    "L": {"en": "overall length under the head", "ko": "머리 밑 전체 길이"},
+    "H": {"en": "head height", "ko": "머리 높이"},
+    "K": {"en": "grip length (unthreaded shank)", "ko": "그립 길이(나사부 제외)"}
+  }
+}
+"""
+
 # 판독 캐시. 도면 하나당 JSON 하나.
 CACHE_DIR = settings.get("STD_SPEC_CACHE", str(Path(__file__).with_name("spec_cache")))
 # 표를 찾을 때 훑을 최대 쪽 수(치수표는 보통 앞쪽에 있다).
@@ -229,6 +264,108 @@ def read_table(pdf: str, pages: str = "", refresh: bool = False) -> dict:
     }
     _save_cache(pdf, data)
     return data
+
+
+def read_legend(pdf: str, page: int = 1, refresh: bool = False) -> dict:
+    """도면 그림에서 **치수 기호가 무엇을 재는지** 읽는다. 반환: {문자: {en, ko}}.
+
+    표 판독과 별개로 계열당 한 번이면 충분해 캐시에 함께 저장한다.
+    읽지 못하면 빈 사전을 돌려준다 — **없는 게 틀린 것보다 낫다.**
+    """
+    cached = load_cached(pdf) or {}
+    if not refresh and cached.get("legend") is not None:
+        return cached.get("legend") or {}
+    if not vision_ingest.FITZ_AVAILABLE:
+        return {}
+    ok, _why = vision_ingest.vlm_check()
+    if not ok:
+        return {}
+    try:
+        doc = vision_ingest.fitz.open(pdf)
+    except Exception:  # noqa: BLE001
+        return {}
+    try:
+        if not 1 <= page <= len(doc):
+            return {}
+        png = vision_ingest.render_page(doc, page)
+    finally:
+        doc.close()
+    parsed = _parse_json(vision_ingest.ask_image(png, LEGEND_PROMPT) or "") or {}
+    legend = parsed.get("legend") or {}
+    # 값 모양을 통일한다(모델이 문자열만 줄 때도 있다).
+    out: dict[str, dict] = {}
+    for k, v in legend.items():
+        if isinstance(v, dict):
+            out[str(k)] = {"en": str(v.get("en", "")), "ko": str(v.get("ko", ""))}
+        elif v:
+            out[str(k)] = {"en": str(v), "ko": ""}
+    if cached:
+        cached["legend"] = out
+        _save_cache(pdf, cached)
+    return out
+
+
+def format_legend(legend: dict, columns: list[str] | None = None) -> str:
+    """치수 기호 범례를 사람이 읽을 형태로. 표에 있는 컬럼만 보여준다."""
+    if not legend:
+        return ("(치수 기호 범례를 읽지 못했습니다 — 각 알파벳이 무슨 치수인지 "
+                "도면 그림을 직접 확인하세요. 추측해서 조건을 걸면 안 됩니다.)")
+    keys = [c for c in (columns or legend.keys()) if c in legend] or list(legend)
+    lines = []
+    for k in keys:
+        v = legend.get(k) or {}
+        ko, en = v.get("ko", ""), v.get("en", "")
+        lines.append(f"  {k:<6} {ko}" + (f"  ({en})" if en else ""))
+    missing = [c for c in (columns or []) if c not in legend]
+    if missing:
+        lines.append(f"  ⚠ 그림에서 못 읽은 기호: {', '.join(missing)} — 도면을 직접 확인하세요")
+    return "\n".join(lines)
+
+
+def resolve_columns(conditions: dict, columns: list[str],
+                    legend: dict) -> tuple[dict, list[str]]:
+    """조건의 키를 **표에 실제로 있는 컬럼 이름**으로 바꾼다.
+
+    반환: (해석된 조건, 문제 목록). 문제가 하나라도 있으면 호출부는 **거절해야 한다** —
+    조건이 안 걸린 채로 거르면 '전부 통과'가 되어 잘못된 부품을 고르게 된다.
+
+    알파벳을 그대로 주면 그대로 쓴다. 한국어/영어 설명을 주면 범례에서 찾는데,
+    **여럿에 걸리면 고르지 않고 되묻는다** — 여기서 찍으면 되돌릴 수 없다.
+    """
+    cols = list(columns or [])
+    colset = {c.upper(): c for c in cols}
+    resolved: dict = {}
+    problems: list[str] = []
+    for key, cond in conditions.items():
+        k = str(key).strip()
+        if k in cols:
+            resolved[k] = cond
+            continue
+        if k.upper() in colset:
+            resolved[colset[k.upper()]] = cond
+            continue
+        # 설명으로 찾기 — 범례의 한국어/영어 문구에 부분 일치
+        needle = re.sub(r"\s+", "", k).lower()
+        hits = []
+        for letter, v in (legend or {}).items():
+            if letter not in cols:
+                continue
+            text = re.sub(r"\s+", "", f"{v.get('ko','')}{v.get('en','')}").lower()
+            if needle and needle in text:
+                hits.append(letter)
+        if len(hits) == 1:
+            resolved[hits[0]] = cond
+        elif len(hits) > 1:
+            problems.append(
+                f"'{k}' 이(가) 여러 기호에 해당합니다: {', '.join(hits)}. "
+                "어느 것인지 지정해 주세요."
+            )
+        else:
+            problems.append(
+                f"'{k}' 이(가) 표의 어느 컬럼인지 확인되지 않았습니다. "
+                f"표의 컬럼: {', '.join(cols)}"
+            )
+    return resolved, problems
 
 
 def verify_table(data: dict, expect_lk: float | None = None) -> tuple[str, bool]:

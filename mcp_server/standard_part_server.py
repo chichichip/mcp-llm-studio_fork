@@ -239,7 +239,10 @@ mcp = FastMCP(
         "넘기세요 — 지침서와 표준품 목록을 함께 보고 어느 계열(중분류·도면번호)을 "
         "보면 되는지 좁혀 줍니다. 계열이 정해진 뒤 그 계열의 실제 부품번호 목록이 "
         "필요하면 list_parts를 부르세요. "
-        "⚠ 이 서버는 **부품번호를 고르지 않습니다.** dash/치수 확정은 스펙 판독과 "
+        "부품번호를 좁힐 때는 read_spec_table로 표와 **치수 기호 범례**를 먼저 보고, "
+        "어느 기호가 사용자가 말한 치수인지 확인한 뒤 select_dash를 부르세요 — 기호의 "
+        "뜻을 추측하지 마세요. "
+        "⚠ 이 서버는 **부품번호를 최종 확정하지 않습니다.** dash/치수 확정은 스펙 판독과 "
         "검증을 거쳐야 하므로, 응답에 붙은 ⚠ 경고와 근거(문서명·쪽)를 반드시 그대로 "
         "사용자에게 전달하세요. 근거 없이 부품번호를 단정하지 마세요."
     ),
@@ -451,6 +454,10 @@ def read_spec_table(drawing: str, spec_dir: str = "", name: str = "",
     out.append(f"쪽: {', '.join(map(str, data.get('pages_used', [])))} / "
                f"컬럼: {', '.join(data.get('columns', []))} / {len(data.get('rows', []))}행")
     out.append("")
+    out.append("■ 치수 기호 (도면 그림에서 판독)")
+    legend = spec_table.read_legend(pdf, refresh=refresh)
+    out.append(spec_table.format_legend(legend, data.get("columns")))
+    out.append("")
     out.append(spec_table.format_rows(data.get("rows", []), data.get("columns")))
     out.append("")
     out.append(f"[검증] {txt}")
@@ -459,7 +466,11 @@ def read_spec_table(drawing: str, spec_dir: str = "", name: str = "",
     for n in (data.get("notes") or [])[:5]:
         out.append(f"  알림: {n}")
     out.append("")
-    out.append('조건으로 좁히려면: select_dash(drawing="{}", conditions={{"컬럼":"값"}})'
+    out.append("⚠ 위 치수 기호 설명은 **VLM이 도면 그림을 읽은 것**이라 검증되지 않았습니다. "
+               "조건을 걸기 전에 어느 기호가 원하는 치수인지 사용자에게 확인하세요 — "
+               "기호의 뜻을 추측하지 마세요.")
+    out.append('조건으로 좁히려면: select_dash(drawing="{}", conditions={{"기호":"값"}}) '
+               "— 기호는 위 표의 컬럼 이름을 그대로 쓰세요."
                .format(drawing or os.path.basename(pdf)))
     return "\n".join(out)
 
@@ -470,8 +481,12 @@ def select_dash(drawing: str, conditions: dict, spec_dir: str = "", name: str = 
                 pages: str = "") -> str:
     """치수표에서 **조건에 맞는 부품번호(dash)**를 고릅니다. (🟢 읽기)
 
-    조건은 표의 컬럼 이름 → 값입니다. 어떤 컬럼이 있는지 모르면 read_spec_table을
-    먼저 부르세요.
+    조건은 표의 컬럼 이름(도면의 치수 기호) → 값입니다.
+
+    ⚠ **어느 기호가 무슨 치수인지 추측하지 마세요.** 'H'가 머리 높이인지 머리 직경인지는
+    도면 그림에만 있습니다. read_spec_table을 먼저 불러 **치수 기호 범례**를 확인하고,
+    거기 적힌 기호를 그대로 쓰세요. 확정되지 않은 이름을 주면 이 도구는 거르지 않고
+    거절합니다(조건이 무시된 채 '전부 통과'가 되면 잘못된 부품을 고르게 되므로).
 
     조건 표기:
         "0.350"    같은 값
@@ -498,10 +513,29 @@ def select_dash(drawing: str, conditions: dict, spec_dir: str = "", name: str = 
     pdf = _resolve_spec(drawing, name, spec_dir)
     data = spec_table.read_table(pdf, pages=pages)
     rows = data.get("rows", [])
-    hits, notes = spec_table.filter_rows(rows, conditions)
+    cols = data.get("columns", [])
+    legend = spec_table.read_legend(pdf)
+
+    # ★ 조건의 키가 표의 어느 컬럼인지 확정되지 않으면 **거절한다.**
+    #   조건을 무시한 채 거르면 '전부 통과'가 되어 잘못된 부품을 고르게 된다.
+    #   여기서 모델이 'H니까 Height겠지'라고 찍는 걸 막는 것이 이 도구의 핵심이다.
+    resolved, problems = spec_table.resolve_columns(conditions, cols, legend)
+    if problems:
+        out = [f"{os.path.basename(pdf)} — 조건을 적용하지 못했습니다.", ""]
+        for pmsg in problems:
+            out.append(f"  ⚠ {pmsg}")
+        out.append("")
+        out.append("■ 치수 기호 (도면 그림에서 판독)")
+        out.append(spec_table.format_legend(legend, cols))
+        out.append("")
+        out.append("어느 기호가 원하는 치수인지 확인한 뒤 그 **기호 이름 그대로** 다시 "
+                   "부르세요. 추측해서 고르면 안 됩니다.")
+        return "\n".join(out)
+
+    hits, notes = spec_table.filter_rows(rows, resolved)
     vtxt, passed = spec_table.verify_table(data)
 
-    cond = ", ".join(f"{k}={v}" for k, v in conditions.items())
+    cond = ", ".join(f"{k}={v}" for k, v in resolved.items())
     out = [f"{os.path.basename(pdf)} — 조건: {cond}", ""]
     if hits:
         out.append(f"■ 선정 {len(hits)}건")
@@ -509,7 +543,7 @@ def select_dash(drawing: str, conditions: dict, spec_dir: str = "", name: str = 
     else:
         out.append("■ 선정 0건 — 조건에 맞는 부품번호가 없습니다.")
         # 숫자 조건이 걸린 첫 컬럼 기준으로 가까운 행을 참고로 보여준다(선정 아님).
-        for k, v in conditions.items():
+        for k, v in resolved.items():
             m = re.match(r"^[<>~=]*\s*([\d.]+)$", str(v).strip())
             if m and k in {c for r in rows for c in r}:
                 near = spec_table.near_rows(rows, k, float(m.group(1)))
