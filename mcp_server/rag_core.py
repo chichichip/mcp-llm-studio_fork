@@ -105,6 +105,11 @@ EMBED_URL = settings.get("RAG_EMBED_URL", "http://127.0.0.1:8001/v1")
 # 리랭커 서버 (llama-server --reranking, bge-reranker 등 GGUF). /v1 까지 포함한 베이스 URL.
 # 서버가 없거나 응답이 없으면 리랭크를 건너뛰고 RRF 순서를 그대로 쓴다(우아한 저하).
 RERANK_URL = settings.get("RAG_RERANK_URL", "http://127.0.0.1:8002/v1")
+# 임베딩 요청에 실을 모델 이름. llama-server는 무시하지만 **사내 게이트웨이(vLLM 등)는
+# 등록된 이름이 아니면 거절한다** — /v1/models에 뜨는 이름을 그대로 적을 것.
+EMBED_MODEL = settings.get("RAG_EMBED_MODEL", "embedding")
+# 게이트웨이가 인증을 요구할 때만 (VLM쪽 RAG_VLM_API_KEY와 같은 용도).
+EMBED_API_KEY = settings.get("RAG_EMBED_API_KEY", "")
 # 인덱스 파일 위치. 기본은 이 스크립트 옆.
 DB_PATH = settings.get("RAG_DB_PATH", "") or settings.get(
     "RAG_DB", str(Path(__file__).with_name("rag_index.db")))
@@ -510,27 +515,60 @@ def _normalize(vec: list[float]) -> list[float]:
     return [v / n for v in vec] if n > 0 else vec
 
 
+def _embed_base() -> str:
+    """EMBED_URL을 `/v1` 베이스로 정규화한다 (`/v1/embeddings` 전체를 줘도 받아 준다)."""
+    u = EMBED_URL.strip().rstrip("/")
+    for suffix in ("/embeddings", "/chat/completions", "/models"):
+        if u.endswith(suffix):
+            return u[: -len(suffix)]
+    return u
+
+
+_embed_reason = ""  # 마지막 실패 사유 — 사내망은 로그를 못 빼내므로 화면에 띄운다
+
+
 def _embed_texts(texts: list[str]) -> list[list[float]] | None:
     """임베딩 서버에 배치 요청. 어떤 실패든 None을 돌려 키워드 전용으로 저하한다.
 
     반환 벡터는 단위 길이로 정규화한다 (검색 때 내적 = 코사인 유사도).
+    실패하면 사유를 `_embed_reason`에 남긴다 — 조용히 저하하면 왜 키워드 전용인지
+    알 수가 없다(VLM쪽 vlm_check와 같은 방침).
     """
+    global _embed_reason
     if not texts:
         return []
-    url = EMBED_URL.rstrip("/") + "/embeddings"
-    body = json.dumps({"model": "embedding", "input": texts}).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
-    )
+    url = _embed_base() + "/embeddings"
+    body = json.dumps({"model": EMBED_MODEL, "input": texts}).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if EMBED_API_KEY:
+        headers["Authorization"] = f"Bearer {EMBED_API_KEY}"
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=EMBED_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:200]
+        except Exception:  # noqa: BLE001
+            pass
+        hint = {
+            400: f" — 모델 이름이 맞는지 확인하세요(지금 '{EMBED_MODEL}'). "
+                 "RAG_EMBED_MODEL로 바꿉니다.",
+            401: " — 인증이 필요합니다(RAG_EMBED_API_KEY).",
+            404: " — 이 서버에 /v1/embeddings 가 없습니다(임베딩 모델 미서빙).",
+        }.get(e.code, "")
+        _embed_reason = f"{url} HTTP {e.code}{hint}" + (f"  응답: {detail}" if detail else "")
+        return None
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
+        _embed_reason = f"{url} 연결 실패: {type(e).__name__}: {e}"
         return None
     items = sorted(data.get("data") or [], key=lambda d: d.get("index", 0))
     vecs = [it.get("embedding") for it in items]
     if len(vecs) != len(texts) or any(not isinstance(v, list) or not v for v in vecs):
+        _embed_reason = f"{url} 응답 형식이 예상과 다릅니다(embedding 배열 없음)."
         return None
+    _embed_reason = ""
     return [_normalize([float(x) for x in v]) for v in vecs]
 
 
@@ -1299,7 +1337,9 @@ def status_text() -> str:
         f"파일 {s['files']}개 / 청크 {s['chunks']}개 "
         f"(벡터 있는 청크 {s['with_vector']}개{', ' + str(s['dim']) + '차원' if s['dim'] else ''})",
         f"키워드 인덱스(FTS5): {'사용 가능' if s['fts'] else '없음 — LIKE로 저하'}",
-        f"임베딩 서버({EMBED_URL}): {'연결됨' if embed_ok else '연결 안 됨 — 검색이 키워드 전용으로 동작'}",
+        f"임베딩 서버({_embed_base()}, 모델 {EMBED_MODEL}): "
+        + ("연결됨" if embed_ok else "연결 안 됨 — 검색이 키워드 전용으로 동작"),
+        *([f"  {_embed_reason}"] if not embed_ok and _embed_reason else []),
         f"리랭커 서버({RERANK_URL}): {'연결됨' if _rerank_available() else '연결 안 됨 — RRF 순위를 그대로 사용'}",
         (
             f"벡터 저장소: Qdrant 로컬 ({store.qdrant_path})"
