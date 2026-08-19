@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -60,6 +61,14 @@ try:
 except Exception as e:  # noqa: BLE001 — openpyxl 부재 등 어떤 실패든 저하로
     catalog = None  # type: ignore[assignment]
     CATALOG_IMPORT_ERROR = str(e)
+
+try:
+    import spec_table
+
+    SPEC_IMPORT_ERROR = ""
+except Exception as e:  # noqa: BLE001
+    spec_table = None  # type: ignore[assignment]
+    SPEC_IMPORT_ERROR = str(e)
 
 # 지침서 검색은 RAG 코어를 그대로 재사용한다(같은 인덱스를 본다 — 따로 만들지 않는다).
 try:
@@ -391,6 +400,216 @@ def list_parts(mid: str, major: str = "", diameter: float = 0) -> str:
             out.append(f"      스펙: {p}" if p else "      스펙: 폴더에서 찾지 못함")
     out.append("")
     out.append("⚠ 어느 부품번호(dash)를 쓸지는 스펙 도면의 치수표를 판독·검증해야 정해집니다.")
+    return "\n".join(out)
+
+
+def _resolve_spec(drawing: str, name: str, spec_dir: str) -> str:
+    """도면번호/품명으로 스펙 PDF 경로를 찾는다. 폴더는 인자 > 설정 순."""
+    if spec_table is None:
+        raise StdError(f"스펙 판독 모듈을 불러오지 못했습니다: {SPEC_IMPORT_ERROR}")
+    folder = spec_dir or SPEC_DIR
+    if not folder:
+        raise StdError(
+            "스펙 폴더가 지정되지 않았습니다. spec_dir 인자로 넘기거나 "
+            "mcp_server/local_settings.py에 STD_SPEC_DIR을 적으세요."
+        )
+    path = spec_table.find_spec_file(folder, drawing, name)
+    if not path:
+        raise StdError(
+            f"'{drawing or name}' 스펙 파일을 {folder} 에서 찾지 못했습니다. "
+            "도면번호나 품명이 파일 이름과 맞는지 확인하세요."
+        )
+    return path
+
+
+@mcp.tool()
+@std_tool
+def read_spec_table(drawing: str, spec_dir: str = "", name: str = "",
+                    pages: str = "", refresh: bool = False) -> str:
+    """스펙 도면의 **치수표 전체**를 판독해 보여줍니다 (VLM). (🟢 읽기)
+
+    표를 통째로 읽고 자동 검증까지 돌립니다. 어떤 컬럼이 있는지 모를 때 먼저 이걸
+    부르고, 그다음 select_dash로 조건을 걸면 됩니다.
+
+    같은 도면을 두 번 읽지 않도록 결과를 캐시합니다(판독은 쪽당 수 초 걸립니다).
+
+    Args:
+        drawing: 도면번호 (예 "AS9556"). 파일 이름을 찾는 데 씁니다.
+        spec_dir: 스펙 PDF 폴더. 비우면 설정값(STD_SPEC_DIR)을 씁니다.
+        name: 품명. 파일이 품명으로 저장돼 있을 때 함께 넘기면 찾을 확률이 올라갑니다.
+        pages: 표가 있는 쪽 (예 "2,3"). 비우면 앞쪽부터 훑습니다.
+        refresh: True면 캐시를 무시하고 다시 판독합니다.
+    """
+    pdf = _resolve_spec(drawing, name, spec_dir)
+    cached = spec_table.load_cached(pdf) is not None and not refresh
+    data = spec_table.read_table(pdf, pages=pages, refresh=refresh)
+    txt, passed = spec_table.verify_table(data)
+
+    out = [f"{os.path.basename(pdf)}" + ("  (캐시된 판독 결과)" if cached else "  (새로 판독)")]
+    if data.get("table_title"):
+        out.append(f"표: {data['table_title']}")
+    out.append(f"쪽: {', '.join(map(str, data.get('pages_used', [])))} / "
+               f"컬럼: {', '.join(data.get('columns', []))} / {len(data.get('rows', []))}행")
+    out.append("")
+    out.append(spec_table.format_rows(data.get("rows", []), data.get("columns")))
+    out.append("")
+    out.append(f"[검증] {txt}")
+    if not passed:
+        out.append("⚠ 검증을 통과하지 못했습니다 — 값을 쓰기 전에 사람이 도면을 확인하세요.")
+    for n in (data.get("notes") or [])[:5]:
+        out.append(f"  알림: {n}")
+    out.append("")
+    out.append('조건으로 좁히려면: select_dash(drawing="{}", conditions={{"컬럼":"값"}})'
+               .format(drawing or os.path.basename(pdf)))
+    return "\n".join(out)
+
+
+@mcp.tool()
+@std_tool
+def select_dash(drawing: str, conditions: dict, spec_dir: str = "", name: str = "",
+                pages: str = "") -> str:
+    """치수표에서 **조건에 맞는 부품번호(dash)**를 고릅니다. (🟢 읽기)
+
+    조건은 표의 컬럼 이름 → 값입니다. 어떤 컬럼이 있는지 모르면 read_spec_table을
+    먼저 부르세요.
+
+    조건 표기:
+        "0.350"    같은 값
+        "<=0.350"  이하 (셀이 범위면 최대값 기준 — 안전한 쪽)
+        ">=0.20"   이상
+        "~0.35"    셀의 범위가 이 값을 포함 (그립이 체결두께를 받는지 등)
+        ".190-32"  나사 규격 (10-32 처럼 다르게 적혀 있어도 같은 나사면 맞음)
+        "A286"     문자열 부분 일치
+
+    예: conditions={"THREAD": ".190-32", "H": "<=0.350"}
+
+    ⚠ 맞는 게 없으면 **없다고 답합니다.** 가까운 행을 참고로 보여주지만 그건 선정이
+    아닙니다 — 그대로 부품번호로 쓰지 마세요.
+
+    Args:
+        drawing: 도면번호.
+        conditions: {컬럼명: 조건} 사전.
+        spec_dir: 스펙 PDF 폴더 (비우면 설정값).
+        name: 품명 (파일 찾기 보조).
+        pages: 표가 있는 쪽.
+    """
+    if not isinstance(conditions, dict) or not conditions:
+        raise StdError('conditions가 비었습니다. 예: {"THREAD": ".190-32", "L": "<=1.5"}')
+    pdf = _resolve_spec(drawing, name, spec_dir)
+    data = spec_table.read_table(pdf, pages=pages)
+    rows = data.get("rows", [])
+    hits, notes = spec_table.filter_rows(rows, conditions)
+    vtxt, passed = spec_table.verify_table(data)
+
+    cond = ", ".join(f"{k}={v}" for k, v in conditions.items())
+    out = [f"{os.path.basename(pdf)} — 조건: {cond}", ""]
+    if hits:
+        out.append(f"■ 선정 {len(hits)}건")
+        out.append(spec_table.format_rows(hits, data.get("columns")))
+    else:
+        out.append("■ 선정 0건 — 조건에 맞는 부품번호가 없습니다.")
+        # 숫자 조건이 걸린 첫 컬럼 기준으로 가까운 행을 참고로 보여준다(선정 아님).
+        for k, v in conditions.items():
+            m = re.match(r"^[<>~=]*\s*([\d.]+)$", str(v).strip())
+            if m and k in {c for r in rows for c in r}:
+                near = spec_table.near_rows(rows, k, float(m.group(1)))
+                if near:
+                    out.append(f"  가까운 후보(선정 아님, {k} 기준):")
+                    out.append(spec_table.format_rows(near, data.get("columns")))
+                break
+    for n in notes:
+        out.append(f"  ⚠ {n}")
+    out.append("")
+    out.append(f"[검증] {vtxt}")
+    if not passed:
+        out.append("⚠ 판독 검증을 통과하지 못했습니다 — 도면을 직접 확인하세요.")
+    out.append("근거: " + os.path.basename(pdf)
+               + f" (쪽 {', '.join(map(str, data.get('pages_used', [])))}, VLM 판독)")
+    return "\n".join(out)
+
+
+@mcp.tool()
+@std_tool
+def find_mating_part(mid: str, thread: str = "", spec_dir: str = "") -> str:
+    """볼트에 **짝이 되는 너트 계열**을 찾고, 나사가 맞는 부품번호까지 좁힙니다. (🟢 읽기)
+
+    중분류로 짝을 정합니다(단순 문자열 치환이 아니라 매핑표) — 후보가 둘이면
+    자동으로 고르지 않고 되묻습니다. 셀프락킹 여부는 설계 요구사항이라 부품 목록에서
+    유도할 수 없기 때문입니다.
+
+    Args:
+        mid: 볼트 중분류 (예 "BOLT, DOUBLE HEX").
+        thread: 나사 규격 (예 ".190-32"). 주면 그 나사에 맞는 dash까지 좁힙니다.
+        spec_dir: 스펙 PDF 폴더 (비우면 설정값).
+    """
+    if catalog is None:
+        raise StdError(f"catalog 모듈을 불러오지 못했습니다: {CATALOG_IMPORT_ERROR}")
+    cands, hint = catalog.nut_categories_for(mid)
+    out = [f"{mid} 의 짝 너트", ""]
+    if not cands:
+        out.append(f"■ {hint}")
+        out.append("  추정하지 않습니다 — 설계 기준을 확인하세요.")
+        return "\n".join(out)
+    if len(cands) > 1:
+        out.append(f"■ 후보가 {len(cands)}개입니다 — 사용자에게 확인이 필요합니다.")
+        for c in cands:
+            out.append(f"  - {c}")
+        out.append(f"  {hint}")
+        return "\n".join(out)
+
+    nut_mid = cands[0]
+    out.append(f"■ 짝 중분류: {nut_mid}")
+    try:
+        items = _catalog_items()
+        series = catalog.find_series(items, mid=nut_mid)
+    except StdError as e:
+        out.append(f"  (표준품 목록을 읽지 못해 도면번호를 붙이지 못했습니다: {e})")
+        return "\n".join(out)
+    if not series:
+        out.append("  ⚠ 표준품 목록에 이 계열이 없습니다.")
+        return "\n".join(out)
+    for drawing, name, dia, rows in series[:MAX_SERIES]:
+        out.append(f"  {drawing}  {name}" + (f" (직경 {dia})" if dia else "")
+                   + f" — 부품번호 {rows}개")
+
+    if not thread.strip():
+        out.append("")
+        out.append("나사 규격(thread)을 주면 맞는 부품번호까지 좁힙니다.")
+        return "\n".join(out)
+
+    out.append("")
+    out.append(f"■ 나사 {thread} 에 맞는 부품번호")
+    folder = spec_dir or SPEC_DIR
+    if not folder or spec_table is None:
+        out.append("  스펙 폴더가 없어 판독하지 못했습니다 — spec_dir을 지정하세요.")
+        return "\n".join(out)
+    found_any = False
+    for drawing, name, _dia, _rows in series[:MAX_SERIES]:
+        try:
+            pdf = spec_table.find_spec_file(folder, drawing, name)
+            if not pdf:
+                out.append(f"  {drawing}: 스펙 파일을 찾지 못했습니다")
+                continue
+            data = spec_table.read_table(pdf)
+            col = next((c for c in data.get("columns", [])
+                        if "THREAD" in str(c).upper() or str(c).upper() == "THD"), "")
+            if not col:
+                out.append(f"  {drawing}: 나사 컬럼을 찾지 못했습니다 "
+                           f"(컬럼: {', '.join(data.get('columns', []))})")
+                continue
+            hits, _n = spec_table.filter_rows(data.get("rows", []), {col: thread})
+            if hits:
+                found_any = True
+                out.append(f"  {drawing} ({col}):")
+                out.append(spec_table.format_rows(hits, [col]))
+            else:
+                out.append(f"  {drawing}: 맞는 부품번호 없음")
+        except (StdError, Exception) as e:  # noqa: BLE001 — 한 계열 실패가 전체를 막지 않게
+            out.append(f"  {drawing}: 판독 실패 ({type(e).__name__}: {e})")
+    if not found_any:
+        out.append("")
+        out.append("  ★ 맞는 너트를 찾지 못했습니다. 이건 실제로 없을 수 있습니다 — "
+                   "지어내지 말고 설계 기준을 확인하세요.")
     return "\n".join(out)
 
 

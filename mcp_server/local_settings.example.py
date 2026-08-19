@@ -70,8 +70,14 @@ RAG_EMBED_API_KEY = ""
 # ─────────────────────────── 표준품 찾기 (standard_part_server) ───────────────────────────
 # 엔진 적용 표준품 목록 엑셀. 없으면 계열 후보는 나오지만 도면번호가 안 붙는다.
 STD_CATALOG_PATH = r"C:\경로\엔진 적용 표준품 목록.xlsx"
-# 스펙 PDF 폴더 (선택). 지정하면 계열마다 스펙 파일 경로까지 보여준다.
+# 스펙 도면 PDF 폴더. 도구의 spec_dir 인자로 그때그때 넘겨도 되고, 여기 적어 두면
+# 인자 없이도 쓴다(하위 폴더까지 훑는다). 파일 이름은 도면번호든 품명이든 상관없다 —
+# 둘 다로 찾아본다.
 STD_SPEC_DIR = r"C:\경로\스펙"
+# 판독 결과 캐시 위치. VLM 판독은 쪽당 수 초라 같은 도면을 두 번 읽지 않게 저장한다.
+# STD_SPEC_CACHE = r"C:\ProgramData\LocalLLMStudio\spec_cache"
+# 표를 찾을 때 앞에서부터 훑을 쪽 수(치수표는 대개 앞쪽에 있다).
+# STD_SPEC_MAX_PAGES = "6"
 
 # ─────────────────────────── 인덱스 저장 위치 (보통 그대로 둔다) ───────────────────────────
 # RAG_DB_PATH = r"C:\ProgramData\LocalLLMStudio\rag_index.db"
