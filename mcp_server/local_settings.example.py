@@ -55,6 +55,18 @@ RAG_EMBED_API_KEY = ""
 # RAG_EMBED_QUERY_PREFIX = ""
 # RAG_EMBED_DOC_TEMPLATE = "{text}"
 
+# ─────────────────────────── 검색 결과 크기 (컨텍스트가 빠듯할 때) ───────────────────────────
+# 매칭 청크에 붙일 이웃 청크 수(앞뒤 각각). 근거가 청크 경계에서 잘리는 걸 막지만
+# 그만큼 결과가 길어진다. 사내 게이트웨이 컨텍스트가 빠듯하면 0으로 줄인다.
+# RAG_CONTEXT_WINDOW = "1"
+
+# 엑셀 한 시트에서 인덱싱할 최대 행 수.
+# RAG_EXCEL_MAX_ROWS = "20000"
+
+# 임베딩 요청 한 번에 보낼 청크 수. 서버가 거절하면 코드가 절반씩 줄여 재시도하지만,
+# llama-server를 -b/-ub 작게 띄웠다면 처음부터 낮춰 두는 편이 빠르다.
+# RAG_EMBED_BATCH = "8"
+
 # ─────────────────────────── 인덱스 저장 위치 (보통 그대로 둔다) ───────────────────────────
 # RAG_DB_PATH = r"C:\ProgramData\LocalLLMStudio\rag_index.db"
 # RAG_QDRANT_PATH = r"C:\ProgramData\LocalLLMStudio\rag_vectors"

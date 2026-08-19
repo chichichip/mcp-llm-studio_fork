@@ -147,7 +147,7 @@ EMBED_DOC_TEMPLATE = settings.get("RAG_EMBED_DOC_TEMPLATE", "title: {title} | te
 
 # 검색 결과에 붙일 이웃 청크 수(같은 섹션 한정, 앞뒤 각각). 0이면 매칭 청크만. 근거가
 # 청크 경계에서 잘리는 걸 막는 small-to-big 확장이다.
-CONTEXT_WINDOW = int(os.getenv("RAG_CONTEXT_WINDOW", "1"))
+CONTEXT_WINDOW = settings.get_int("RAG_CONTEXT_WINDOW", 1)
 MAX_CONTEXT_CHARS = 2400          # 이웃 청크까지 합친 블록의 최대 표시 길이
 
 
@@ -270,7 +270,7 @@ def _word_as_pdf(path: str, password: str = ""):
 # ⚠ 이건 **검색용 근사**다 — 부품번호 정확 조회는 spec-reader/catalog.py가 엑셀을 직접
 # 읽어서 한다(RAG는 청크 경계에서 행이 잘릴 수 있어 '정확히 이 부품이 있나'에 못 쓴다).
 
-EXCEL_MAX_ROWS = int(os.getenv("RAG_EXCEL_MAX_ROWS", "20000"))  # 시트당 상한(폭주 방지)
+EXCEL_MAX_ROWS = settings.get_int("RAG_EXCEL_MAX_ROWS", 20000)  # 시트당 상한(폭주 방지)
 
 
 def _fmt_cell(v) -> str:
