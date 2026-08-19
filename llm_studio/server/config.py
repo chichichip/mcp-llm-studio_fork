@@ -196,6 +196,7 @@ MCP_BUNDLED_SERVERS = (
     # 사내 포털은 사이트 주소·계정을 먼저 설정해야 쓸 수 있다. 설정 전에 켜 두면
     # 도구만 늘고 모두 안내만 돌려주므로 꺼 둔다 (intranet_server.py 참고).
     ("intranet", "intranet_server.py", False),
+    ("std", "standard_part_server.py", False),
 )
 
 

@@ -31,7 +31,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### `mcp_server/` — MCP 서버 모음
 
-MCP 서버(office/outlook/catia/rag/ansys/pdf)와 스모크 테스트, **그리고 그 실행용 bat이 전부 이 폴더에 있다**. `run_office_server.bat`·`run_outlook_server.bat`·`run_catia_server.bat`·`run_rag_server.bat`·`run_ansys_server.bat`·`run_pdf_server.bat`이 각각을 띄우는 실행 파일이다 — **인자 없이(더블클릭) 실행하면 HTTP 트랜스포트**로 뜨고, 인자를 주면 그대로 전달한다(`run_office_server.bat --transport stdio`). RAG 인덱스 구성 CLI는 `run_rag_indexer.bat`이 따로 있다. bat들은 자기 폴더로 `cd`한 뒤 같은 폴더의 `*.py`를 부르고, 파이썬은 **루트의 공용 `venv/`를 `..\venv\Scripts\python.exe`로** 찾는다(없으면 시스템 python) — 이 상대경로(`..\venv`)를 깨지 말 것. `rag_core.py`는 `office_server.py`를, `test_outlook.py`는 `outlook_server.py`를 같은 폴더에서 import하므로 **파이썬 파일을 폴더 밖으로 따로 옮기면 깨진다**(RAG 코드가 mcp_server를 못 떠나는 이유 — 학습에 넣을 문서만 루트 `rag_docs/`에 둔다). bat 파일은 **CRLF 줄바꿈 + 영어 ASCII만** 유지할 것 — LF로 저장하면 cmd가 줄 경계를 잘못 잘라 주석 조각을 명령으로 실행하고, 한글은 콘솔 코드페이지(cp949)와 파일 인코딩(UTF-8)이 어긋나 깨진다.
+MCP 서버(office/outlook/catia/rag/ansys/pdf/intranet/std)와 스모크 테스트, **그리고 그 실행용 bat이 전부 이 폴더에 있다**. `run_office_server.bat`·`run_outlook_server.bat`·`run_catia_server.bat`·`run_rag_server.bat`·`run_ansys_server.bat`·`run_pdf_server.bat`이 각각을 띄우는 실행 파일이다 — **인자 없이(더블클릭) 실행하면 HTTP 트랜스포트**로 뜨고, 인자를 주면 그대로 전달한다(`run_office_server.bat --transport stdio`). RAG 인덱스 구성 CLI는 `run_rag_indexer.bat`이 따로 있다. bat들은 자기 폴더로 `cd`한 뒤 같은 폴더의 `*.py`를 부르고, 파이썬은 **루트의 공용 `venv/`를 `..\venv\Scripts\python.exe`로** 찾는다(없으면 시스템 python) — 이 상대경로(`..\venv`)를 깨지 말 것. `rag_core.py`는 `office_server.py`를, `test_outlook.py`는 `outlook_server.py`를 같은 폴더에서 import하므로 **파이썬 파일을 폴더 밖으로 따로 옮기면 깨진다**(RAG 코드가 mcp_server를 못 떠나는 이유 — 학습에 넣을 문서만 루트 `rag_docs/`에 둔다). bat 파일은 **CRLF 줄바꿈 + 영어 ASCII만** 유지할 것 — LF로 저장하면 cmd가 줄 경계를 잘못 잘라 주석 조각을 명령으로 실행하고, 한글은 콘솔 코드페이지(cp949)와 파일 인코딩(UTF-8)이 어긋나 깨진다.
 
 ### `mcp_server/office_server.py` / `outlook_server.py` — COM 기반 MCP 서버
 
@@ -115,6 +115,19 @@ PyMAPDL(`ansys-mapdl-core`, gRPC)로 MAPDL을 조종해 열해석(정상상태·
 - 도구(전부 🟢): `read_pdf_text(path, pages, max_chars)`, `read_pdf_metadata(path)`, `pdf_status(path)`. `pypdf`/`pywin32`가 없어도 import에서 죽지 않고 도구가 안내로 저하. http/sse는 :8092.
 - **word_com은 hang-safe**다: Word의 'PDF를 편집 가능한 문서로 변환' 확인창은 `DisplayAlerts=0`으로 안 꺼지므로(개발 PC 재현), Open을 데몬 스레드에서 돌리고 워치독이 그 대화상자를 자동 확인하며 `WORD_TIMEOUT`(기본 90초) 초과 시 **우리가 띄운 Word PID만**(생성 전후 차집합) taskkill한다 — 사용자 Word는 건드리지 않고, 막혀도 MCP 서버가 얼지 않는다.
 - ⚠ 실기 검증 대상: DRM이 **Word.exe에 .pdf 복호화까지 허용하는지**(확장자 스코프 DRM이면 막힐 수 있음), 대화상자 자동 확인이 실기에서 실제로 통하는지. **서버 없이 `python mcp_server\pdf_server.py --probe <PDF경로>`로 각 백엔드를 진단**할 것. 개발 PC엔 실제 DRM이 없어(nProtect만 상주) word_com의 성공 여부는 사내 PC에서만 확정된다. `pypdf`는 `llm_studio`가 이미 쓰던 것을 루트 requirements.txt에 추가했다.
+
+### `mcp_server/standard_part_server.py` — 항공 표준품 찾기 MCP 서버
+
+"무엇이 필요한가"를 받아 **어느 계열(중분류·도면번호)을 보면 되는지**까지 좁히는 읽기 전용(🟢) 서버. 도구 3개: `find_standard`(요구사항 → 계열 후보 + 지침서 근거) / `list_parts`(계열의 실제 부품번호 조회) / `std_status`(진단). http/sse는 :8094. llm_studio에는 `std`로 등록되지만 **기본 `disabled`** — `STD_CATALOG_PATH`를 설정하기 전에는 도구만 늘기 때문이다.
+
+**일을 위험도로 가른 것이 이 서버의 설계다.** ① 어느 계열을 쓰나 — 틀리면 엉뚱한 표를 보고 사람이 알아챈다 → 여기서 한다. ② 그 계열의 어느 부품번호 — 틀리면 잘못된 부품이 조립되고 못 알아챈다 → **여기서 안 한다**(spec-reader의 판독+`verify.py`가 할 일). 중분류가 60개인데 계열마다 선정 기준이 달라(오링은 홈 치수, 클램프는 튜브 외경, 볼트는 그립) ②를 한꺼번에 만들 수 없다 — ①만 전 계열에 일반화되고, ②는 규칙이 확정되는 계열부터 하나씩 붙인다.
+
+- **계열 후보는 세 경로에서 모으고 근거가 센 것부터 보여준다**: 지침서 본문에 나온 계열 > 요구사항에 영문 계열명이 그대로 있음 > 한국어 낱말 유추(`TERMS` 사전). 순서가 중요하다 — 약한 모델은 맨 위 후보를 잡으므로, '배관' 같은 넓은 낱말로 유추한 것이 지침서가 직접 지시한 계열보다 위에 오면 안 된다. 같은 등급 안에서는 **엑셀에 실제로 있는 계열**을 앞세운다.
+- **엑셀에 없는 계열도 후보에서 지우지 않는다.** 조용히 빼면 모델이 '그 계열은 존재하지 않는다'고 잘못 결론짓는다 — '목록에 없음'으로 표시해 뒤로 보낼 뿐이다.
+- `TERMS`는 한국어↔영문 계열명 사전이다. 여기 없는 낱말이어도 지침서 본문에서 계열명을 줍는 경로가 따로 있어 못 찾는 게 아니다 — 빠른 길일 뿐이라 새 낱말은 한 줄 추가하면 된다.
+- 지침서 검색은 **rag_core를 그대로 재사용**한다(같은 인덱스를 본다 — 따로 만들지 않는다). RAG가 없거나 인덱스가 비어도 죽지 않고 엑셀만으로 후보를 낸다.
+- `spec-reader/`는 폴더명에 하이픈이 있어 패키지 import가 안 된다 — 이 파일 기준 절대경로를 `sys.path`에 얹어 `catalog`를 가져온다(앱이 절대경로로 띄워 cwd가 달라도 되게).
+- ⚠ **응답에 '부품번호는 정하지 않는다'는 경고를 코드가 직접 박아 넣는다.** 프롬프트로 부탁하는 것보다 세다 — 모델이 요약하며 떨어뜨리지 못한다.
 
 ### `mcp_server/intranet_server.py` — 사내 포털(SharePoint) 검색 MCP 서버
 

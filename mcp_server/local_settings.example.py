@@ -67,6 +67,12 @@ RAG_EMBED_API_KEY = ""
 # llama-server를 -b/-ub 작게 띄웠다면 처음부터 낮춰 두는 편이 빠르다.
 # RAG_EMBED_BATCH = "8"
 
+# ─────────────────────────── 표준품 찾기 (standard_part_server) ───────────────────────────
+# 엔진 적용 표준품 목록 엑셀. 없으면 계열 후보는 나오지만 도면번호가 안 붙는다.
+STD_CATALOG_PATH = r"C:\경로\엔진 적용 표준품 목록.xlsx"
+# 스펙 PDF 폴더 (선택). 지정하면 계열마다 스펙 파일 경로까지 보여준다.
+STD_SPEC_DIR = r"C:\경로\스펙"
+
 # ─────────────────────────── 인덱스 저장 위치 (보통 그대로 둔다) ───────────────────────────
 # RAG_DB_PATH = r"C:\ProgramData\LocalLLMStudio\rag_index.db"
 # RAG_QDRANT_PATH = r"C:\ProgramData\LocalLLMStudio\rag_vectors"
