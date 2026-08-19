@@ -76,13 +76,8 @@ def _index_one_file(store: RagStore, path: str, password: str = "",
     embed_texts = [core._embed_doc_text(c["content"], c["heading"]) for c in chunks]
     vectors: list[list[float]] | None = None
     if use_embed is not False:
-        vectors = []
-        for i in range(0, len(embed_texts), EMBED_BATCH):
-            batch = core._embed_texts(embed_texts[i:i + EMBED_BATCH])
-            if batch is None:
-                vectors = None  # 서버 죽음/오류 → 이 파일은 키워드 전용으로 저장
-                break
-            vectors.extend(batch)
+        # 배치가 크면 서버가 거절하므로 _embed_batched가 줄여 가며 맞춘다.
+        vectors = core._embed_batched(embed_texts)  # 실패하면 None → 키워드 전용으로 저장
     store.replace_file(path, st.st_mtime, st.st_size, chunks, vectors, kind, source)
     vec_note = f"벡터 {len(vectors)}개" if vectors else "벡터 없음(키워드 전용)"
     pages = {c["page"] for c in chunks if c["page"]}
@@ -230,11 +225,16 @@ def embed_only() -> str:
     ids = [int(c["id"]) for c in chunks]
     done = 0
     start = time.time()
-    for i in range(0, len(texts), EMBED_BATCH):
-        batch = core._embed_texts(texts[i:i + EMBED_BATCH])
+    step = max(1, core.EMBED_BATCH) * 8   # 진행 표시 단위 (내부에서 더 잘게 나눠 보낸다)
+    for i in range(0, len(texts), step):
+        batch = core._embed_batched(texts[i:i + step])
         if batch is None:
-            return (f"임베딩 도중 서버 응답이 끊겼습니다. {done}개까지 붙였습니다 — "
-                    "서버를 확인하고 다시 실행하면 이어서(전체 다시) 진행합니다.")
+            raise RagError(
+                f"임베딩 도중 서버 응답이 끊겼습니다. {done}/{len(ids)}개까지 붙였습니다.\n"
+                f"  사유: {core._embed_reason or '불명'}\n"
+                "  배치를 1까지 줄여도 안 되면 청크 하나가 모델 한도를 넘는 것입니다 — "
+                "llama-server를 `-c 4096 -b 4096 -ub 4096`처럼 크게 잡고 다시 실행하세요."
+            )
         done += store.set_vectors(ids[i:i + len(batch)], batch)
         print(f"  임베딩 {done}/{len(ids)}", end="\r", file=sys.stderr)
     print("", file=sys.stderr)

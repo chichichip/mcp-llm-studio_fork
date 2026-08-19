@@ -119,7 +119,10 @@ QDRANT_PATH = settings.get("RAG_QDRANT_PATH", "") or settings.get(
 
 CHUNK_SIZE = 1000      # 청크 목표 길이(문자)
 CHUNK_OVERLAP = 200    # 청크 사이 겹침(문자)
-EMBED_BATCH = 16       # 임베딩 요청 한 번에 보낼 청크 수
+# 임베딩 요청 한 번에 보낼 청크 수. **llama-server의 배치 크기(-b/-ub)를 넘으면
+# 요청이 통째로 거절된다** — 청크 하나가 500~700토큰이라 16개면 1만 토큰이 넘는다.
+# 실패하면 아래 _embed_batched가 자동으로 절반씩 줄여 재시도한다.
+EMBED_BATCH = settings.get_int("RAG_EMBED_BATCH", 8)
 EMBED_TIMEOUT = 120    # 임베딩 요청 타임아웃(초) — CPU 서빙이면 배치가 느릴 수 있다
 
 # 인덱싱 대상 확장자 → 읽는 경로(kind). 확장자마다 본문을 얻는 방법이 다르다:
@@ -575,6 +578,34 @@ def _embed_texts(texts: list[str]) -> list[list[float]] | None:
 def _embed_available() -> bool:
     """임베딩 서버가 응답하는지 1건짜리 요청으로 확인한다."""
     return bool(_embed_texts(["ping"]))
+
+
+def _embed_batched(texts: list[str], batch: int = 0) -> list[list[float]] | None:
+    """여러 텍스트를 배치로 임베딩하되, **실패하면 배치를 절반씩 줄여 다시 시도**한다.
+
+    llama-server는 한 요청의 토큰 합이 배치 크기(-b/-ub, 기본 512~2048)를 넘으면
+    요청을 통째로 거절한다. 청크 하나가 500~700토큰이라 몇 개만 묶어도 넘기 쉽다.
+    서버 설정을 바꾸지 않아도 되도록 여기서 줄여 가며 맞춘다 — 1개까지 줄여도
+    안 되면 그건 배치 문제가 아니므로 사유를 남기고 포기한다.
+    """
+    size = batch or EMBED_BATCH
+    while size >= 1:
+        out: list[list[float]] = []
+        failed = False
+        for i in range(0, len(texts), size):
+            got = _embed_texts(texts[i:i + size])
+            if got is None:
+                failed = True
+                break
+            out.extend(got)
+        if not failed:
+            return out
+        if size == 1:
+            return None
+        size = max(1, size // 2)
+        print(f"[주의] 임베딩 배치를 {size}로 줄여 다시 시도합니다 ({_embed_reason})",
+              file=sys.stderr)
+    return None
 
 
 def _embed_query_text(query: str) -> str:

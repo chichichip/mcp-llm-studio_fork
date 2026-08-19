@@ -79,6 +79,7 @@ pywin32(COM)로 **이미 로그인·실행 중인** Office/Outlook을 직접 조
 - **문서 읽기는 office_server의 `_document`를 import해 재사용**한다 — Word COM이 여는 것이라 사내 DRM 문서도 읽힌다. 같은 제약(사용자 세션, Windows+Office)을 물려받는다.
 - **임베딩은 llama-server `--embeddings`**(기본 `http://127.0.0.1:8001/v1`, EmbeddingGemma 등 GGUF를 CPU `-ngl 0` 상주 권장). **서버가 없으면 키워드 인덱스만 만들고 검색도 키워드 전용으로 우아하게 저하** — 나중에 서버를 켜고 `--reindex`로 돌리면 벡터가 붙는다. 이 저하 경로 덕에 임베딩 모델 반입 전에도 개발·검증이 가능하다.
 - 임베딩 모델을 바꿔 벡터 차원이 달라지면 Qdrant 컬렉션을 자동 재생성한다(stderr 경고) — 이후 `--embed-only`로 벡터만 다시 채우면 된다.
+- 임베딩 요청은 **배치가 크면 서버가 통째로 거절한다**(`input is too large to process`) — 청크 하나가 500~700토큰이라 몇 개만 묶어도 llama-server 기본 배치(-b/-ub)를 넘는다. `_embed_batched`가 실패하면 배치를 절반씩 줄여 재시도하고(8→4→2→1), 1까지 줄여도 안 되면 사유를 남기고 포기한다. 서버는 `-c 4096 -b 4096 -ub 4096`처럼 크게 잡는 편이 빠르다.
 - **임베딩 서버를 나중에 확보했을 때 전체 `--reindex`를 돌리지 말 것** — PDF/Word를 VLM으로 다시 전사하느라 이미 끝낸 판독을 통째로 버린다. `--embed-only`가 문서를 열지 않고 저장된 청크에 벡터만 붙인다(`store.set_vectors`). 프리픽스(`EMBED_QUERY_PREFIX`/`DOC_TEMPLATE`)는 모델마다 달라 `local_settings.py`에서 바꾼다 — 안 맞으면 오류 없이 품질만 떨어진다.
 - 키워드 검색은 llm_studio `memory.py`와 같은 패턴(FTS5 trigram + 조사 제거 LIKE 저하)이다 — 한쪽 휴리스틱을 고치면 다른 쪽도 확인할 것.
 - **임베딩 서버가 없으면 낱말이 다를 때 아무것도 못 찾는다**(질문 '체결두께' ↔ 문서 '그립'). 키워드 기법으로는 메울 수 없는 간극이라, 그 사이의 통로로 `list_sections`(쪽별 제목 = 목차)를 둔다 — 모델이 목차에서 문서가 실제로 쓰는 용어를 확인하고 다시 검색한다. 검색 0건일 때 응답이 이 도구를 직접 가리킨다.
