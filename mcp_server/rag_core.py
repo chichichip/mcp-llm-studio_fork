@@ -1286,7 +1286,8 @@ def _pages_to_chunks(pages: list[dict], notes: list[str]) -> tuple[list[dict], s
 
 
 def extract_chunks(path: str, password: str = "", use_vlm: bool | None = None,
-                   word_vision: bool = False) -> tuple[list[dict], str, list[str]]:
+                   word_vision: bool = False,
+                   progress=None) -> tuple[list[dict], str, list[str]]:
     """파일 하나에서 청크 레코드를 뽑는다. 반환: (청크들, 사용한 경로, 알림들).
 
     확장자에 따라 Word COM / Excel COM / Vision(PDF)로 갈린다. 어느 쪽이든 결과는
@@ -1295,6 +1296,10 @@ def extract_chunks(path: str, password: str = "", use_vlm: bool | None = None,
     word_vision=True면 Word 문서도 PDF로 내보내 Vision 경로로 읽는다 — 표·그림이
     본문인 지침서용. 기본값 False(텍스트 추출)인 이유는 셋이다: 훨씬 빠르고, Word가
     뽑은 텍스트가 전사보다 정확하며, PyMuPDF·VLM 없이도 동작하기 때문이다.
+
+    progress: Vision 경로에서 쪽을 읽기 직전마다 불리는 훅(쪽번호, 마지막쪽). 인덱서가
+    진행 상황을 화면에 남기는 데 쓴다 — COM 경로(Word 텍스트/Excel)는 쪽 개념이 없어
+    부르지 않는다.
     """
     kind = doc_kind(path)
     if kind == "word":
@@ -1304,7 +1309,7 @@ def extract_chunks(path: str, password: str = "", use_vlm: bool | None = None,
         with _word_as_pdf(path, password) as pdf:
             # image_key: 이미지 캐시를 임시 PDF가 아니라 **원본 .docx**에 붙인다.
             pages, notes = vision_ingest.extract_pdf_pages(
-                pdf, use_vlm=use_vlm, image_key=path
+                pdf, use_vlm=use_vlm, image_key=path, progress=progress
             )
         if not pages:
             raise RagError(
@@ -1317,7 +1322,8 @@ def extract_chunks(path: str, password: str = "", use_vlm: bool | None = None,
         return chunk_document(_extract_excel_text(path, password)), "excel", []
     if kind == "pdf":
         _require_vision()
-        pages, notes = vision_ingest.extract_pdf_pages(path, use_vlm=use_vlm)
+        pages, notes = vision_ingest.extract_pdf_pages(path, use_vlm=use_vlm,
+                                                       progress=progress)
         if not pages:
             raise RagError("PDF에서 본문을 얻지 못했습니다: " + ("; ".join(notes) or "사유 불명"))
         chunks, source = _pages_to_chunks(pages, notes)

@@ -342,7 +342,7 @@ def _pdf_fallback_text(path: str) -> tuple[str, str]:
 
 def extract_pdf_pages(
     path: str, use_vlm: bool | None = None, dpi: int = 0, max_pages: int = 0,
-    image_key: str = "", first_page: int = 1,
+    image_key: str = "", first_page: int = 1, progress=None,
 ) -> tuple[list[dict], list[str]]:
     """PDF를 페이지 단위로 읽어 [{page, text, image, source}, ...] 와 알림 목록을 돌려준다.
 
@@ -354,6 +354,11 @@ def extract_pdf_pages(
 
     first_page/max_pages: 읽을 구간(1-based, 앞 쪽부터가 기본). 진단할 때 특정 쪽만
     보려고 있다 — VLM 전사는 쪽마다 돈이 드니 필요 없는 쪽을 읽지 않는다.
+
+    progress: 쪽을 읽기 직전마다 progress(쪽번호, 마지막쪽)으로 불린다(기본 None —
+    아무 일도 하지 않는다). 전사는 쪽당 수 초라 긴 PDF 하나에 몇 분이 걸리는데,
+    폐쇄망에서는 로그를 반출할 수 없어 **화면이 멈춘 것과 구별이 안 된다** — 인덱서가
+    이 훅으로 진행 상황을 남긴다. 표시가 실패해도 인덱싱은 계속한다.
     """
     key = image_key or path
     notes: list[str] = []
@@ -398,6 +403,11 @@ def extract_pdf_pages(
         if (start, last) != (1, total):
             notes.append(f"전체 {total}쪽 중 {start}~{last}쪽만 읽었습니다.")
         for pno in range(start, last + 1):
+            if progress is not None:
+                try:
+                    progress(pno, last)
+                except Exception:  # noqa: BLE001 — 진행 표시 실패가 인덱싱을 멈추지 않게
+                    pass
             layer = ""
             try:
                 layer = (doc[pno - 1].get_text() or "").strip()

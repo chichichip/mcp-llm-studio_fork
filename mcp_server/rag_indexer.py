@@ -37,9 +37,57 @@ import argparse
 import os
 import sys
 import time
+import unicodedata
 
 import rag_core as core
 from rag_core import DOC_PATTERNS, EMBED_BATCH, OfficeError, RagError, RagStore
+
+
+# ─────────────────────────────── 진행 표시 ───────────────────────────────
+# VLM 전사는 쪽당 수 초라 PDF 수십 개면 수십 분이 걸리는데, 결과는 맨 마지막에 한 번에
+# 나온다 — 그동안 화면이 완전히 조용해 **멈춘 것과 구별이 안 된다**. 폐쇄망에서는 로그를
+# 반출할 수 없어 화면이 유일한 단서라, 지금 몇 번째 파일의 몇 쪽을 읽는 중인지 남긴다.
+# 진행 표시는 **stderr**로 보낸다: stdout은 결과(다른 도구가 받아 갈 수 있는 값)의 몫이다.
+
+_STATUS_WIDTH = 0  # 마지막으로 그린 진행 줄의 표시 폭 (덮어쓸 때 남는 꼬리를 지우려고)
+
+
+def _disp_width(s: str) -> int:
+    """터미널 표시 폭. 한글·한자는 두 칸을 차지해 len()으로는 덮어쓰기가 어긋난다."""
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in s)
+
+
+def _ellipsis(name: str, limit: int = 44) -> str:
+    """진행 줄이 터미널 폭을 넘겨 줄바꿈되면 \\r 덮어쓰기가 깨지므로 이름을 줄인다."""
+    if _disp_width(name) <= limit:
+        return name
+    out, w = "", 0
+    for ch in name:
+        cw = 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+        if w + cw > limit - 1:
+            break
+        out, w = out + ch, w + cw
+    return out + "…"
+
+
+def _status(text: str, done: bool = False) -> None:
+    """진행 줄을 같은 자리에 덮어 쓴다. done=True면 그 줄을 확정하고 줄을 넘긴다."""
+    global _STATUS_WIDTH
+    pad = max(0, _STATUS_WIDTH - _disp_width(text))
+    try:
+        print("\r" + text + " " * pad, end=("\n" if done else ""),
+              file=sys.stderr, flush=True)
+    except Exception:  # noqa: BLE001 — 콘솔 인코딩 문제로 인덱싱이 멈추면 안 된다
+        return
+    _STATUS_WIDTH = 0 if done else _disp_width(text)
+
+
+def _status_clear() -> None:
+    """진행 줄이 남아 있으면 지운다 (요약을 그 위에 겹쳐 찍지 않도록)."""
+    global _STATUS_WIDTH
+    if _STATUS_WIDTH:
+        print("\r" + " " * _STATUS_WIDTH + "\r", end="", file=sys.stderr, flush=True)
+        _STATUS_WIDTH = 0
 
 
 # ─────────────────────────────── 인덱싱 파이프라인 ───────────────────────────────
@@ -59,14 +107,16 @@ def _iter_doc_files(folder: str) -> list[str]:
 
 def _index_one_file(store: RagStore, path: str, password: str = "",
                     reindex: bool = False, use_embed: bool | None = None,
-                    use_vlm: bool | None = None, word_vision: bool = False) -> str:
+                    use_vlm: bool | None = None, word_vision: bool = False,
+                    progress=None, stage=None) -> str:
     """파일 하나를 인덱싱한다. 반환: 한 줄 결과 요약."""
     st = os.stat(path)
     if not reindex and store.file_unchanged(path, st.st_mtime, st.st_size):
         return "변경 없음 — 건너뜀"
     kind = core.doc_kind(path)
     chunks, source, notes = core.extract_chunks(path, password, use_vlm=use_vlm,
-                                                word_vision=word_vision)
+                                                word_vision=word_vision,
+                                                progress=progress)
     if not chunks:
         store.replace_file(path, st.st_mtime, st.st_size, [], None, kind, source)
         return "본문 없음 — 청크 0개"
@@ -76,6 +126,9 @@ def _index_one_file(store: RagStore, path: str, password: str = "",
     embed_texts = [core._embed_doc_text(c["content"], c["heading"]) for c in chunks]
     vectors: list[list[float]] | None = None
     if use_embed is not False:
+        # 임베딩도 청크가 많으면 수십 초가 걸린다 — 전사가 끝난 뒤 다시 조용해지지 않게.
+        if stage is not None:
+            stage(f"임베딩 {len(embed_texts)}개")
         # 배치가 크면 서버가 거절하므로 _embed_batched가 줄여 가며 맞춘다.
         vectors = core._embed_batched(embed_texts)  # 실패하면 None → 키워드 전용으로 저장
     store.replace_file(path, st.st_mtime, st.st_size, chunks, vectors, kind, source)
@@ -120,21 +173,36 @@ def index_folder(folder: str, reindex: bool = False, prune: bool = True,
     results: list[str] = []
     ok = skipped = failed = 0
     start = time.time()
-    for path in files:
+    total = len(files)
+    print(f"[진행] 대상 {total}개 — 시작합니다 "
+          f"(Ctrl+C로 끊어도 이미 끝난 파일은 인덱스에 남습니다).", file=sys.stderr)
+    for i, path in enumerate(files, 1):
+        head = f"[{i}/{total}] {_ellipsis(os.path.basename(path))}"
+        _status(head)
         try:
-            note = _index_one_file(store, path, password, reindex, use_embed=embed_ok,
-                                   use_vlm=use_vlm, word_vision=word_vision)
+            note = _index_one_file(
+                store, path, password, reindex, use_embed=embed_ok,
+                use_vlm=use_vlm, word_vision=word_vision,
+                progress=lambda p, last, _h=head: _status(f"{_h}  {p}/{last}쪽"),
+                stage=lambda s, _h=head: _status(f"{_h}  {s}"),
+            )
             if note.startswith("변경 없음"):
                 skipped += 1
+                # 건너뛴 파일은 줄을 남기지 않는다 — 다음 파일이 같은 자리에 덮어쓴다.
+                # (수백 개를 다시 훑을 때 화면이 '변경 없음'으로만 채워지지 않게)
             else:
                 ok += 1
+                _status(f"{head} — {note}", done=True)
                 results.append(f"  - {os.path.basename(path)}: {note}")
         except (RagError, OfficeError) as e:
             failed += 1
+            _status(f"{head} — ✗ {e}", done=True)
             results.append(f"  ✗ {os.path.basename(path)}: {e}")
         except Exception as e:  # noqa: BLE001 — 한 파일 실패가 전체를 멈추지 않게
             failed += 1
+            _status(f"{head} — ✗ {type(e).__name__}: {e}", done=True)
             results.append(f"  ✗ {os.path.basename(path)}: {type(e).__name__}: {e}")
+    _status_clear()
     # 정리는 **이번에 훑은 폴더 안**으로 한정한다 — 다른 폴더를 따로 인덱싱해 둔
     # 것을 이번 실행이 지우면 안 된다.
     pruned = (store.remove_missing({os.path.abspath(f) for f in files}, under=root)
@@ -172,8 +240,17 @@ def index_file(path: str, password: str = "", use_vlm: bool | None = None,
         core._require_word()
     _preflight_vision([p], word_vision)
     store = core.get_store()
-    note = _index_one_file(store, p, password, reindex=True, use_embed=None,
-                           use_vlm=use_vlm, word_vision=word_vision)
+    head = _ellipsis(os.path.basename(p))
+    _status(head)
+    try:
+        note = _index_one_file(
+            store, p, password, reindex=True, use_embed=None,
+            use_vlm=use_vlm, word_vision=word_vision,
+            progress=lambda pg, last, _h=head: _status(f"{_h}  {pg}/{last}쪽"),
+            stage=lambda s, _h=head: _status(f"{_h}  {s}"),
+        )
+    finally:
+        _status_clear()
     return f"인덱싱 완료: {os.path.basename(p)} — {note}"
 
 

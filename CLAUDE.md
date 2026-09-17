@@ -67,7 +67,7 @@ pywin32(COM)로 **이미 로그인·실행 중인** Office/Outlook을 직접 조
 
 - `rag_core.py` — 공용 코어(문서 읽기·청킹·임베딩·저장소). 실행 파일 아님. 설정(DB_PATH 등)은 CLI가 덮어쓰므로 다른 모듈에서는 `core.DB_PATH`처럼 **매번 속성으로** 읽는다(from-import 복사 금지).
 - `vision_ingest.py` — **PDF 인제스트**(페이지 이미지 → VLM 전사). 아래 'Vision RAG' 절. 서버 없이 `python mcp_server\vision_ingest.py --probe <PDF>`로 진단.
-- `rag_indexer.py` — **구성 CLI** (🟡 인덱싱 / 🔴 `--clear`는 `--yes` 없이 프리뷰만). `run_rag_indexer.bat`.
+- `rag_indexer.py` — **구성 CLI** (🟡 인덱싱 / 🔴 `--clear`는 `--yes` 없이 프리뷰만). `run_rag_indexer.bat`. 결과 요약은 stdout, **진행 상황은 stderr**로 나눠 보낸다 — VLM 전사는 쪽당 수 초라 PDF 수십 개면 수십 분이 걸리는데, 요약만 맨 끝에 찍으면 그동안 화면이 조용해 멈춘 것과 구별이 안 된다(폐쇄망은 로그를 반출 못 해 화면이 유일한 단서다). `_status`가 `\r`로 한 줄을 덮어써 `[12/87] MS9555.pdf 3/9쪽`처럼 보여주고, 그 훅이 `extract_chunks(progress=)` → `extract_pdf_pages(progress=)`로 내려간다(기본 None이라 다른 호출자는 영향 없음).
 - `rag_server.py` — **서빙 MCP** (🟢 search_docs/list_sections/read_page/ask_page/rag_status **읽기 전용** — 모델이 인덱스를 못 건드린다). `run_rag_server.bat`, stdio 기본, http/sse는 :8090.
 
 확장자→읽는 경로는 `DOC_KINDS` 한 곳에서 정한다: word=Word COM, excel=Excel COM, pdf=vision_ingest. 어느 경로든 결과는 **같은 모양의 청크 레코드**(`{heading, content, page, image}`)라 검색·임베딩은 원본 종류를 모른다 — 새 형식을 추가할 땐 `extract_chunks`에 분기 하나만 더하면 된다. 옛 `(heading, content)` 튜플도 `replace_file`이 받아 준다(하위 호환).
