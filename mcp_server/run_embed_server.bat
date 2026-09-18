@@ -28,6 +28,7 @@ set "EMBED_PORT="
 set "EMBED_NOTE="
 for /f "usebackq delims=" %%L in (`"%PY%" settings.py embed-launch`) do set %%L
 
+if not defined EMBED_OK goto :nopython
 if not defined EMBED_EXE goto :missing
 if not defined EMBED_GGUF goto :missing
 
@@ -44,11 +45,24 @@ goto :end
 :missing
 echo.
 echo [ERROR] Embedding model or llama-server not found.
-echo   %EMBED_NOTE%
+if defined EMBED_NOTE echo   %EMBED_NOTE%
 echo.
 echo Add these two lines to mcp_server\local_settings.py and run again:
 echo     RAG_EMBED_GGUF   = r"C:\path\to\embeddinggemma-Q8_0.gguf"
 echo     RAG_LLAMA_SERVER = r"C:\path\to\llama-server.exe"
+echo.
+
+:nopython
+echo.
+echo [ERROR] Could not run Python, so the paths could not be looked up.
+echo   Tried: %PY%
+echo.
+echo Check, in this order:
+echo   1) Run this by hand and read the error:
+echo        "%PY%" settings.py embed-launch
+echo   2) Is settings.py next to this .bat? (copy the whole mcp_server folder)
+echo   3) Is the venv at ..\venv\Scripts\python.exe, or python on PATH?
+echo   4) A syntax error in local_settings.py also breaks this.
 echo.
 
 :end

@@ -141,6 +141,9 @@ def embed_launch() -> list[str]:
         f'"EMBED_EXE={exe}"',
         f'"EMBED_PORT={port}"',
         f'"EMBED_NOTE={note}"',
+        # 마지막 표식 — bat이 '파이썬이 아예 못 돌았다'와 '경로를 못 찾았다'를 구분한다.
+        # 없으면 파이썬이 없거나 settings.py를 못 읽은 것인데, 그 둘은 고치는 법이 다르다.
+        '"EMBED_OK=1"',
     ]
 
 
