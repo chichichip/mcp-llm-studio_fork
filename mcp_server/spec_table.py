@@ -266,12 +266,31 @@ def read_table(pdf: str, pages: str = "", refresh: bool = False) -> dict:
     return data
 
 
-def read_legend(pdf: str, page: int = 1, refresh: bool = False) -> dict:
+def needs_legend(columns) -> bool:
+    """이 표에 치수 기호 범례가 필요한가.
+
+    범례는 컬럼이 `H`·`K`·`L` 같은 **알파벳 기호**일 때만 의미가 있다. AS568처럼
+    컬럼이 `I.D. MILLIMETERS` 같은 낱말이면 뜻이 이미 적혀 있으므로 도면 그림을
+    다시 판독할 이유가 없다 — VLM 호출 한 번은 사내 게이트웨이에서 수십 초라
+    그냥 낭비이고, 읽어 봐야 엉뚱한 범례가 붙을 위험만 생긴다.
+    """
+    for c in (columns or []):
+        t = re.sub(r"[^A-Za-z0-9]", "", str(c))
+        if 1 <= len(t) <= 2 and t.isalpha():
+            return True
+    return False
+
+
+def read_legend(pdf: str, page: int = 1, refresh: bool = False, columns=None) -> dict:
     """도면 그림에서 **치수 기호가 무엇을 재는지** 읽는다. 반환: {문자: {en, ko}}.
 
     표 판독과 별개로 계열당 한 번이면 충분해 캐시에 함께 저장한다.
     읽지 못하면 빈 사전을 돌려준다 — **없는 게 틀린 것보다 낫다.**
+
+    columns를 주면 **기호 컬럼이 없는 표에서는 VLM을 아예 부르지 않는다**(needs_legend).
     """
+    if columns is not None and not needs_legend(columns):
+        return {}
     cached = load_cached(pdf) or {}
     if not refresh and cached.get("legend") is not None:
         return cached.get("legend") or {}
@@ -544,3 +563,73 @@ def format_rows(rows: list[dict], columns: list[str] | None = None, limit: int =
     if len(rows) > limit:
         out.append(f"… 외 {len(rows) - limit}행")
     return "\n".join(out)
+
+
+# ─────────────────────────── 진단 CLI ───────────────────────────
+# 앱의 MCP 도구 호출에는 제한 시간이 있는데(llm_studio 기본 120초), 표가 여러 쪽이면
+# VLM 판독이 그걸 넘긴다. 그러면 도구는 타임아웃으로 죽고 캐시도 안 남아 **몇 번을
+# 시도해도 같은 자리에서 실패한다.** 여기서 미리 한 번 읽어 캐시에 넣어 두면, 이후
+# 앱에서의 호출은 캐시를 읽어 즉시 끝난다.
+#
+#   python spec_table.py --dir C:\rag\vision AS568
+#   python spec_table.py --dir C:\rag\vision AS568 --pages 2,3 --refresh
+#
+# 컬럼 이름을 눈으로 확인하는 용도이기도 하다 — select_dash 조건을 그 이름 그대로
+# 적어야 하기 때문이다.
+
+
+def _cli() -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        description="스펙 치수표를 미리 판독해 캐시에 넣는다(앱의 호출 제한 밖에서).")
+    ap.add_argument("drawing", help="도면번호 또는 품명 (파일 이름의 일부)")
+    ap.add_argument("--dir", default="", help="스펙 PDF 폴더 (비우면 STD_SPEC_DIR)")
+    ap.add_argument("--pages", default="", help='쪽 지정 "2,3" (비우면 앞에서부터 훑음)')
+    ap.add_argument("--refresh", action="store_true", help="캐시를 무시하고 다시 판독")
+    ap.add_argument("--rows", type=int, default=10, help="보여줄 행 수 (기본 10)")
+    a = ap.parse_args()
+
+    folder = a.dir or settings.get("STD_SPEC_DIR", "")
+    if not folder:
+        print("스펙 폴더를 --dir 로 주거나 local_settings.py에 STD_SPEC_DIR을 적으세요.",
+              file=sys.stderr)
+        return 2
+    pdf = find_spec_file(folder, a.drawing)
+    if not pdf:
+        print(f"'{a.drawing}' 스펙 파일을 {folder} 에서 찾지 못했습니다.", file=sys.stderr)
+        return 2
+    print(f"파일: {pdf}")
+    print("판독 중… (쪽마다 VLM 호출이라 수십 초 걸릴 수 있습니다)", file=sys.stderr)
+
+    t0 = time.time()
+    data = read_table(pdf, pages=a.pages, refresh=a.refresh)
+    cols = data.get("columns") or []
+    rows = data.get("rows") or []
+    print(f"판독 {time.time() - t0:.1f}초, 쪽 {data.get('pages_used')}, 행 {len(rows)}개")
+    print()
+    print("컬럼 (select_dash 조건에 이 이름을 그대로 쓰세요):")
+    for c in cols:
+        print(f"  - {c}")
+    print()
+    if needs_legend(cols):
+        legend = read_legend(pdf, refresh=a.refresh, columns=cols)
+        print(format_legend(legend, cols))
+        print()
+    else:
+        print("치수 기호 범례: 필요 없음 (컬럼이 낱말이라 뜻이 이미 적혀 있음)")
+        print()
+    vtxt, ok = verify_table(data)
+    print(f"[검증] {vtxt}")
+    if not ok:
+        print("⚠ 검증을 통과하지 못했습니다 — 도면을 직접 확인하세요.")
+    print()
+    print(format_rows(rows[: max(1, a.rows)], cols))
+    print()
+    print(f"캐시: {_cache_path(pdf)}")
+    print("이제 앱에서 read_spec_table / select_dash 를 부르면 이 캐시를 씁니다.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_cli())

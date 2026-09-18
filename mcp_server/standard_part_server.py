@@ -478,10 +478,14 @@ def read_spec_table(drawing: str, spec_dir: str = "", name: str = "",
     out.append(f"쪽: {', '.join(map(str, data.get('pages_used', [])))} / "
                f"컬럼: {', '.join(data.get('columns', []))} / {len(data.get('rows', []))}행")
     out.append("")
-    out.append("■ 치수 기호 (도면 그림에서 판독)")
-    legend = spec_table.read_legend(pdf, refresh=refresh)
-    out.append(spec_table.format_legend(legend, data.get("columns")))
-    out.append("")
+    # 컬럼이 낱말이면 범례를 읽지 않는다 — 뜻이 이미 적혀 있고, VLM 호출 한 번이
+    # 사내 게이트웨이에서 수십 초라 도구 호출 제한(기본 120초)을 넘기는 원인이 된다.
+    if spec_table.needs_legend(data.get("columns")):
+        out.append("■ 치수 기호 (도면 그림에서 판독)")
+        legend = spec_table.read_legend(pdf, refresh=refresh,
+                                        columns=data.get("columns"))
+        out.append(spec_table.format_legend(legend, data.get("columns")))
+        out.append("")
     out.append(spec_table.format_rows(data.get("rows", []), data.get("columns")))
     out.append("")
     out.append(f"[검증] {txt}")
@@ -490,17 +494,16 @@ def read_spec_table(drawing: str, spec_dir: str = "", name: str = "",
     for n in (data.get("notes") or [])[:5]:
         out.append(f"  알림: {n}")
     out.append("")
-    out.append("⚠ 위 치수 기호 설명은 VLM이 도면 그림을 읽은 것이라 검증되지 않았습니다. "
-               "조건을 걸기 전에 어느 기호가 원하는 치수인지 사용자에게 확인하세요 — "
-               "기호의 뜻을 추측하지 마세요.")
+    if spec_table.needs_legend(data.get("columns")):
+        out.append("⚠ 위 치수 기호 설명은 VLM이 도면 그림을 읽은 것이라 검증되지 "
+                   "않았습니다. 조건을 걸기 전에 어느 기호가 원하는 치수인지 사용자에게 "
+                   "확인하세요 — 기호의 뜻을 추측하지 마세요.")
     out.append('조건으로 좁히려면: select_dash(drawing="{}", conditions={{"기호":"값"}}) '
                "— 기호는 위 표의 컬럼 이름을 그대로 쓰세요."
                .format(drawing or os.path.basename(pdf)))
     return "\n".join(out)
 
 
-@mcp.tool()
-@std_tool
 def _cond_center(cond) -> float | None:
     """조건에서 '가까운 후보'를 찾을 기준값 하나를 뽑는다. 숫자가 없으면 None.
 
@@ -524,6 +527,8 @@ def _cond_center(cond) -> float | None:
     return None
 
 
+@mcp.tool()
+@std_tool
 def select_dash(drawing: str, conditions: dict, spec_dir: str = "", name: str = "",
                 pages: str = "") -> str:
     """치수표에서 **조건에 맞는 부품번호(dash)**를 고릅니다. (🟢 읽기)
@@ -572,7 +577,9 @@ def select_dash(drawing: str, conditions: dict, spec_dir: str = "", name: str = 
     data = spec_table.read_table(pdf, pages=pages)
     rows = data.get("rows", [])
     cols = data.get("columns", [])
-    legend = spec_table.read_legend(pdf)
+    # 컬럼이 낱말인 표(AS568의 "I.D. MILLIMETERS" 등)는 범례가 필요 없다 —
+    # VLM 호출 한 번은 사내 게이트웨이에서 수십 초라 도구 호출 제한을 넘기는 원인이 된다.
+    legend = spec_table.read_legend(pdf, columns=cols)
 
     # ★ 조건의 키가 표의 어느 컬럼인지 확정되지 않으면 **거절한다.**
     #   조건을 무시한 채 거르면 '전부 통과'가 되어 잘못된 부품을 고르게 된다.

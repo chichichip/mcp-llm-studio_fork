@@ -19,10 +19,14 @@ mcp_servers.json에 정의된 MCP 서버들에 연결해 도구를 발견하고 
 from __future__ import annotations
 
 import asyncio
+import os
 import json
 from pathlib import Path
 
-CALL_TIMEOUT_SEC = 120
+# 도구 하나가 이만큼 넘게 걸리면 끊는다. 스펙 치수표 판독(VLM, 쪽마다 수 초)은
+# 여러 쪽이면 이걸 넘길 수 있다 — 그때는 mcp_server/spec_table.py 를 CLI 로 한 번
+# 돌려 캐시에 넣어 두면 이후 호출이 즉시 끝난다(권장). 그래도 모자라면 이 값을 늘린다.
+CALL_TIMEOUT_SEC = int(os.getenv("MCP_CALL_TIMEOUT_SEC", "120"))
 # 서버 하나가 '연결됨 또는 실패'로 확정되기를 기다리는 한도. 앱이 서버를 직접 띄우는
 # stdio 구성에서는 파이썬 기동 + import(pywin32/qdrant 등)까지 걸리므로 넉넉히 잡되,
 # 무한정 기다리지는 않는다 — 서버 하나가 멈추면 앱 자체가 못 뜨기 때문이다.

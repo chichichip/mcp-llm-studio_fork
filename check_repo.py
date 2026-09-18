@@ -160,6 +160,34 @@ def check_tool_stdout(paths: list[Path]) -> None:
                                  f"print가 stdout으로 간다 (file=sys.stderr 필요)")
 
 
+def check_private_tools(paths: list[Path]) -> None:
+    """`@mcp.tool()`이 비공개 헬퍼(`_`로 시작)에 붙지 않았나.
+
+    **실제로 겪은 사고**: `select_dash` 바로 위의 데코레이터와 함수 사이에 헬퍼
+    `_cond_center`를 끼워 넣었더니, 데코레이터가 헬퍼를 감싸 버려 `_cond_center`가
+    도구로 노출되고 `select_dash`는 **도구 목록에서 통째로 사라졌다.** 파이썬도
+    실행도 멀쩡해서 아무 오류가 안 나고, 모델이 "그런 도구가 없다"고 할 때까지
+    모른다. 비공개 이름에 도구 데코레이터가 붙는 일은 정상적으로는 없으므로
+    이것만 봐도 이 사고가 잡힌다.
+    """
+    for p in paths:
+        if p.suffix != ".py" or p.parent.name != "mcp_server" or not p.is_file():
+            continue
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name.startswith("_") and any(
+                    "tool" in ast.dump(d) for d in node.decorator_list):
+                errors.append(
+                    f"{rel(p)}:{node.lineno}: 비공개 헬퍼 {node.name}()에 도구 "
+                    f"데코레이터가 붙었다 — 바로 아래 함수의 데코레이터를 가로챘을 "
+                    f"가능성이 크다(그 함수는 도구 목록에서 사라진다)")
+
+
 def check_tool_markdown(paths: list[Path]) -> None:
     """도구가 **돌려주는** 문자열에 마크다운을 쓰지 않았나.
 
@@ -218,6 +246,7 @@ def main() -> int:
     check_hosts(paths)
     check_tool_stdout(paths)
     check_tool_markdown(paths)
+    check_private_tools(paths)
 
     for w in warns:
         print(f"  ! {w}")
