@@ -5,7 +5,7 @@ mcp_servers.json에 정의된 MCP 서버들에 연결해 도구를 발견하고 
 설정 형식 (Claude Desktop과 동일한 mcpServers 규격):
     {
       "mcpServers": {
-        "search":  {"url": "http://10.0.0.5:8082/mcp"},
+        "search":  {"url": "http://10.x.x.x:8082/mcp"},
         "files":   {"command": "python", "args": ["file_server.py"], "env": {}}
       }
     }
