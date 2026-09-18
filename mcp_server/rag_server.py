@@ -16,7 +16,9 @@ RAG **서빙** MCP 서버 — 읽기 전용(🟢). 인덱스 구성(인덱싱·�
 
 ⚠ 이 서버는 문서를 **찾아 읽어 주는** 도구다. 치수를 재어 부품을 고르는 판단에
 직접 쓰지 말 것 — 표준품 선정은 spec-reader의 검증(verify.py)을 거친 판독값으로
-결정론적으로 해야 한다(저장소 CLAUDE.md 'Vision RAG' 절).
+결정론적으로 해야 한다(저장소 CLAUDE.md 'Vision RAG' 절). 스펙 도면
+(`STD_SPEC_DIR` 아래)에서 나온 결과에는 그 경고를 **코드가 직접 박아 넣는다** —
+아래 '스펙 도면 경고' 절.
 
 사용:
     python rag_server.py                     # MCP 서버 (stdio)
@@ -42,7 +44,43 @@ import sys
 from fastmcp import FastMCP
 
 import rag_core as core
+import settings
 from rag_core import MAX_RESULT_CHARS, RRF_K, RagError, rag_tool
+
+# ─────────────────────────── 스펙 도면 경고 ───────────────────────────
+# 스펙 도면을 RAG에 넣으면 **본문 글**(재질·온도·적용 범위 — 표가 아니라 문단이라
+# spec_table로는 못 읽는다)을 찾을 수 있게 되는 이득이 있다. 대신 검색이 **치수표
+# 조각**도 돌려주게 되는데, 그 숫자는 청크 경계에서 잘렸을 수 있고 어느 dash 행인지
+# 흐려졌을 수 있으며 무엇보다 verify.py 검증을 거치지 않았다.
+#
+# select_dash는 치수 기호를 확정 못 하면 거절하는 방어가 있지만 **search_docs에는
+# 그런 방어가 없다** — 약한 모델이 검색 결과의 숫자를 그대로 답으로 내놓는 게 이
+# 구조에서 가장 새기 쉬운 구멍이다. 그래서 도면에서 나온 결과에는 코드가 경고를
+# 직접 박아 넣는다(프롬프트로 부탁하는 것보다 세다 — 모델이 요약하며 못 떨어뜨린다).
+#
+# 판별은 경로로 한다: STD_SPEC_DIR 아래면 도면. 안 잡혀 있으면 아무 일도 하지 않는다.
+
+SPEC_MARK = "  ⚠ 스펙 도면"
+SPEC_WARNING = (
+    "⚠ 위 결과에는 **스펙 도면**이 섞여 있습니다(⚠ 표시).\n"
+    "  거기 보이는 치수 숫자를 부품 선정 근거로 쓰지 마세요 — 청크 경계에서 잘렸을 수 "
+    "있고, 어느 dash 행의 값인지 흐려졌을 수 있으며, 판독 검증을 거치지 않았습니다.\n"
+    "  치수로 부품번호를 정해야 하면 read_spec_table / select_dash(std 서버)를 쓰세요. "
+    "이 검색 결과는 '어느 도면에 무엇이 쓰여 있나'를 찾는 용도입니다."
+)
+
+
+def _is_spec_drawing(path: str) -> bool:
+    """이 문서가 스펙 도면 폴더(STD_SPEC_DIR) 아래에 있나. 미설정이면 항상 False."""
+    root = settings.get("STD_SPEC_DIR", "")
+    if not root:
+        return False
+    try:
+        p = os.path.normcase(os.path.abspath(path))
+        r = os.path.normcase(os.path.abspath(root))
+    except Exception:  # noqa: BLE001 — 경로 정규화 실패가 검색을 막으면 안 된다
+        return False
+    return p == r or p.startswith(r + os.sep)
 
 mcp = FastMCP(
     name="docs",
@@ -142,6 +180,7 @@ def search_docs(query: str, top_k: int = 5) -> str:
     out = [f"검색: {q}  [{mode}]", ""]
     seen: set[str] = set()
     i = 0
+    has_spec = False
     for _cid, c in order:
         if i >= k:
             break
@@ -152,9 +191,13 @@ def search_docs(query: str, top_k: int = 5) -> str:
         if len(content) > cap:
             content = content[:cap] + " …(생략)"
         i += 1
-        out.append(f"[{i}] {_cite(c)}")
+        spec = _is_spec_drawing(c["path"])
+        has_spec = has_spec or spec
+        out.append(f"[{i}] {_cite(c)}" + (SPEC_MARK if spec else ""))
         out.append(content)
         out.append("")
+    if has_spec:
+        out.append(SPEC_WARNING)
     return "\n".join(out).rstrip()
 
 
@@ -277,6 +320,12 @@ def read_page(document: str, page: int) -> str:
         out.append(f"(원본 이미지: {img} — 더 확인이 필요하면 ask_page로 되물으세요)")
     out.append("")
     out.append(body)
+    # 도면 한 쪽을 통째로 돌려주는 자리라 치수표가 그대로 딸려 나온다 — search_docs보다
+    # 오히려 '표를 다 읽었다'고 착각하기 쉽다. 여기서도 경고를 붙인다.
+    if _is_spec_drawing(path):
+        out.append("")
+        out.append(SPEC_WARNING.replace("위 결과에는 **스펙 도면**이 섞여 있습니다(⚠ 표시).",
+                                        "이 문서는 **스펙 도면**입니다."))
     return "\n".join(out)
 
 
@@ -334,10 +383,16 @@ def ask_page(document: str, page: int, question: str) -> str:
             f"VLM 서버({core.vision_ingest.VLM_URL})에서 응답을 받지 못했습니다. "
             "rag_status로 연결을 확인하거나 read_page로 전사 원문을 읽으세요."
         )
-    return (
+    out = (
         f"{os.path.basename(path)} {page}쪽 재판독 (VLM — 검증되지 않은 판독값)\n"
         f"원본 이미지: {img}\n\n{answer.strip()}"
     )
+    # 도면을 VLM으로 다시 읽은 값은 가장 그럴듯해 보이는데 검증은 가장 덜 된 값이다.
+    if _is_spec_drawing(path):
+        out += "\n\n" + SPEC_WARNING.replace(
+            "위 결과에는 **스펙 도면**이 섞여 있습니다(⚠ 표시).",
+            "이 문서는 **스펙 도면**이고, 위 답은 VLM이 그림을 한 번 읽은 것입니다.")
+    return out
 
 
 def _expand_context(store, c: dict) -> str:
