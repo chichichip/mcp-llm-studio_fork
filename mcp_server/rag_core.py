@@ -1112,6 +1112,21 @@ class RagStore:
                         "heading": r["heading"] or "", "len": r["len"]})
         return out
 
+    def file_sample(self, path: str, chunks: int = 6, max_chars: int = 6000) -> str:
+        """한 파일의 앞부분 전사문을 조금 꺼낸다 — 문서 역할(치수표/설계기준/…) 판정용.
+
+        doc_roles가 파일명만이 아니라 **내용**을 보고 판정하게 하려고 있다. 앞쪽 몇
+        청크면 충분하다(표지·목차·첫 표에 성격이 다 드러난다). 전체를 읽으면 문서가
+        수백 개일 때 느려진다.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT c.content FROM chunks c JOIN files f ON f.id = c.file_id "
+                "WHERE f.path = ? ORDER BY c.seq LIMIT ?",
+                (path, int(chunks)),
+            ).fetchall()
+        return "\n".join(r["content"] for r in rows)[:max_chars]
+
     def page_chunks(self, path: str, page: int) -> list[dict]:
         """한 파일의 특정 쪽에 속한 청크들을 seq 순으로 (전사 원문 되읽기용)."""
         with self._lock:

@@ -53,6 +53,19 @@ def get(name: str, default: str = "") -> str:
     return default
 
 
+def get_obj(name: str, default=None):
+    """dict·list 같은 **문자열이 아닌** 설정값. 환경변수로는 못 주므로 파일만 본다.
+
+    get()은 환경변수를 먼저 보고 str()로 바꾸기 때문에 RAG_DOC_ROLES 같은 dict에는
+    쓸 수 없다. 형식이 어긋나면(문자열을 적었다든가) default로 물러선다 — 설정 하나
+    때문에 서버가 죽으면 안 된다.
+    """
+    if _local is None:
+        return default
+    v = getattr(_local, name, None)
+    return default if v is None else v
+
+
 def get_int(name: str, default: int) -> int:
     try:
         return int(get(name, str(default)))

@@ -79,6 +79,12 @@ except Exception as e:  # noqa: BLE001
     core = None  # type: ignore[assignment]
     RAG_IMPORT_ERROR = str(e)
 
+# 근거가 어느 성격의 문서에서 나왔는지 구분한다(사내 지침서 / 국제 규격 / 치수표).
+try:
+    import doc_roles
+except Exception:  # noqa: BLE001 — 딱지가 없어도 후보는 낼 수 있다
+    doc_roles = None  # type: ignore[assignment]
+
 
 CATALOG_PATH = settings.get("STD_CATALOG_PATH", "")
 SPEC_DIR = settings.get("STD_SPEC_DIR", "")
@@ -193,6 +199,24 @@ def _catalog_items() -> list:
     return _items
 
 
+def _role_of(c: dict) -> str:
+    """이 근거가 어느 성격의 문서에서 나왔나 — '지침서'로 뭉뚱그리지 않기 위해.
+
+    사내 지침서 조항과 국제 규격(ARP 등) 조항은 무게가 다르다. 예전에는 인덱스에서
+    나온 것을 전부 "지침서"라고 적어 **국제 규격 조항이 사내 규정처럼 보였다.**
+    항공 부품에서 그 구분이 지워지면 안 된다.
+    """
+    if doc_roles is None:
+        return ""
+    try:
+        role, _why = doc_roles.role_of(c["path"])
+        if not role and core is not None:
+            role, _why = doc_roles.role_of(c["path"], core.get_store().file_sample(c["path"]))
+        return role
+    except Exception:  # noqa: BLE001 — 딱지 실패가 후보 제시를 막으면 안 된다
+        return ""
+
+
 def _guide_hits(query: str, top_k: int = 4) -> tuple[list[dict], str]:
     """지침서(RAG 인덱스)에서 관련 대목을 찾는다. 반환: (청크들, 검색 방식).
 
@@ -304,7 +328,7 @@ def find_standard(requirement: str) -> str:
         add(mid, RANK_NAMED, "요구사항에 계열명 있음")
     for c in hits:
         for mid in _names_in(c.get("content", "")):
-            add(mid, RANK_GUIDE, f"지침서 {_cite(c)}")
+            add(mid, RANK_GUIDE, f"{doc_roles.role_name(_role_of(c))} {_cite(c)}")
 
     out = [f"요구사항: {q}", ""]
 

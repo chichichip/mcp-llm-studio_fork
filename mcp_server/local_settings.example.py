@@ -74,6 +74,20 @@ RAG_EMBED_API_KEY = ""
 # RAG_EMBED_GGUF   = r"C:\models\embeddinggemma-Q8_0.gguf"
 # RAG_LLAMA_SERVER = r"C:\llama\llama-server.exe"
 
+# ─────────────────────────── 문서 역할 (doc_roles) ───────────────────────────
+# 인덱스에 성격이 다른 문서가 섞여 있고 쓰는 법이 다르다. 역할은 파일명과 전사문 내용으로
+# **자동 판정**하므로 보통 아무것도 안 적어도 된다 — 자동 판정이 틀릴 때만 여기에 적는다
+# (사람이 적은 것이 언제나 이긴다). 키는 파일명 패턴(대소문자 무시), 값은 아래 넷 중 하나.
+#   "routing"  사내 지침서 — 어느 규격·도면을 볼지 가리키는 문서
+#   "design"   설계기준(ARP 등) — 계산식이 있는 곳. 계산 과정을 보이라고 안내한다
+#   "table"    치수표(AS568 등) — 🔴 숫자를 그대로 쓰지 말라고 경고하고 select_dash로 보낸다
+#   "spec"     규격 본문
+# RAG_DOC_ROLES = {
+#     "AS568*":            "table",
+#     "*GENERAL DESIGN*":  "design",
+#     "*지침서*":            "routing",
+# }
+
 # ─────────────────────────── 표준품 찾기 (standard_part_server) ───────────────────────────
 # 엔진 적용 표준품 목록 엑셀. 없으면 계열 후보는 나오지만 도면번호가 안 붙는다.
 STD_CATALOG_PATH = r"C:\경로\엔진 적용 표준품 목록.xlsx"
