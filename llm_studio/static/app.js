@@ -68,6 +68,20 @@ function md(src) {
       while (i < lines.length && !lines[i].startsWith("```")) buf.push(lines[i++]);
       i++;
       out.push(`<pre><code>${buf.join("\n")}</code></pre>`);
+    } else if (/^\s*(\$\$|\\\[)/.test(line)) {           // 수식 블록 ($$…$$ / \[…\])
+      // 여러 줄에 걸쳐도 한 요소 안에 둔다 — 문단으로 쪼개지면 KaTeX가 짝을 못 찾는다.
+      const open = line.trim().startsWith("$$") ? "$$" : "\\[";
+      const close = open === "$$" ? "$$" : "\\]";
+      const buf = [line];
+      let done = line.trim().slice(open.length).includes(close);
+      i++;
+      while (!done && i < lines.length) {
+        buf.push(lines[i]);
+        done = lines[i].includes(close);
+        i++;
+      }
+      out.push(`<div class="math-block">${buf.join("\n")}</div>`);
+      continue;
     } else if (/^#{1,3}\s/.test(line)) {                // 제목
       const level = line.match(/^#+/)[0].length;
       out.push(`<h${level}>${mdInline(line.replace(/^#+\s*/, ""))}</h${level}>`);
@@ -118,6 +132,32 @@ function md(src) {
     i++;
   }
   return out.join("\n");
+}
+
+/* 수식 렌더링 — md()로 HTML을 만든 **뒤**에 KaTeX가 텍스트 노드를 훑어 바꿔 준다.
+
+   스트리밍 중에는 부르지 않는다: 토큰마다 innerHTML이 다시 그려지므로 매번 수식을
+   조판하면 느리고 깜빡인다. 스트림이 끝났을 때와 대화를 다시 열 때만 한 번씩 부른다.
+
+   `pre`/`code`는 건드리지 않는다 — 도구 결과(치수표)가 수식으로 오인돼 뭉개지면 안 된다.
+   KaTeX 파일이 없거나 실패해도 **채팅은 그대로 동작한다**(수식만 원문으로 남는다). */
+function typesetMath(el) {
+  if (!el || typeof window.renderMathInElement !== "function") return;
+  try {
+    window.renderMathInElement(el, {
+      delimiters: [
+        { left: "$$", right: "$$", display: true },
+        { left: "\\[", right: "\\]", display: true },
+        { left: "\\(", right: "\\)", display: false },
+        { left: "$", right: "$", display: false },
+      ],
+      ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code", "option"],
+      throwOnError: false,   // 깨진 수식 하나가 답변 전체를 막지 않게
+      errorColor: "#c0392b",
+    });
+  } catch (e) {
+    /* 수식 렌더링 실패가 대화를 막으면 안 된다 */
+  }
 }
 
 /* ==================== 메시지 렌더링 ==================== */
@@ -382,6 +422,7 @@ function renderHistory(messages) {
         const content = document.createElement("div");
         content.className = "content";
         content.innerHTML = md(m.content);
+        typesetMath(content);
         assistantDiv.appendChild(content);
       }
     } else if (m.role === "tool") {
@@ -530,6 +571,7 @@ async function send() {
       currentApproval = null;
     }
     if (reasoningEl) finishReasoning(reasoningEl);
+    typesetMath(container);   // 스트리밍이 끝난 뒤 한 번만 (토큰마다 하면 깜빡인다)
     setSending(false);
     loadConversations();
   }

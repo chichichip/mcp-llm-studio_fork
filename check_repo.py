@@ -110,8 +110,16 @@ def check_size(paths: list[Path]) -> None:
 
 
 def check_hosts(paths: list[Path]) -> None:
-    """공개 저장소다 — 사내 호스트·IP가 커밋되면 안 된다."""
+    """공개 저장소다 — 사내 호스트·IP가 커밋되면 안 된다.
+
+    **반입한 서드파티(static/vendor/)는 건너뛴다.** 우리가 쓴 코드가 아니고, 압축된
+    라이브러리에는 XML 네임스페이스(www.w3.org) 같은 주소가 당연히 들어 있다. 대신
+    새 라이브러리를 vendor에 넣을 때는 **사람이 한 번 확인한다**: 런타임에 네트워크로
+    나가지 않는지(fetch/XHR/Worker/동적 script/eval), 폐쇄망에서 파일만으로 도는지.
+    """
     for p in paths:
+        if "vendor" in p.parts:
+            continue
         if p.suffix.lower() not in TEXT_EXT or not p.is_file():
             continue
         try:
