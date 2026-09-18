@@ -247,16 +247,76 @@ def _cache_dir_for(path: str) -> Path:
     return Path(PAGE_IMAGE_DIR) / f"{stem}_{h}"
 
 
-def render_page(doc, page_no: int, dpi: int = 0, max_side: int = 0) -> bytes:
+def detect_rotation(doc, pages) -> int:
+    """글자 방향으로 본 이 페이지들의 회전각(시계방향). 모르면 0. **VLM을 안 부른다.**
+
+    왜 필요한가: PyMuPDF는 페이지의 `/Rotate`는 알아서 적용하지만, 도면·치수표는
+    **`/Rotate` 없이 내용만 옆으로 그려진** PDF가 흔하다(CAD 출력·스캔본). 그러면
+    렌더 결과가 누운 채 나오고 VLM은 "표가 없다"고만 답한다 — 오류가 아니라 빈
+    결과라 화면만 봐서는 원인이 안 보인다(AS568 치수표가 실제로 그랬다).
+
+    텍스트 레이어의 `dir`(글자 진행 방향)로 공짜로 알아낸다. 스캔본처럼 텍스트
+    레이어가 없으면 0을 돌려주므로, 그건 호출부가 0행일 때 각도를 바꿔 다시
+    부르는 쪽으로 처리한다(우아한 저하).
+    """
+    votes: dict[int, int] = {}
+    for pno in list(pages)[:4]:                  # 앞 몇 쪽이면 방향은 충분히 보인다
+        try:
+            data = doc[pno - 1].get_text("dict")
+        except Exception:  # noqa: BLE001 — 텍스트 레이어가 없거나 못 읽으면 넘어간다
+            continue
+        for block in data.get("blocks", []):
+            for line in block.get("lines", []):
+                d = line.get("dir") or (1.0, 0.0)
+                if abs(d[0]) > 0.7:              # 가로쓰기 — 돌릴 필요 없다
+                    rot = 0
+                elif d[1] < -0.7:                # 아래→위로 흐른다 = 반시계로 누움
+                    rot = 90                     #   시계로 90도 돌리면 바로 선다
+                elif d[1] > 0.7:                 # 위→아래로 흐른다
+                    rot = 270
+                else:
+                    continue
+                votes[rot] = votes.get(rot, 0) + len(line.get("spans", []) or [1])
+    if not votes:
+        return 0
+    best = max(votes, key=lambda k: votes[k])
+    # 가로쓰기가 섞여 있으면(제목·쪽번호만 바로 선 경우가 있다) **누운 쪽이 확실히
+    # 우세할 때만** 돌린다. 애매하면 0으로 두고 호출부의 재시도에 맡긴다 —
+    # 바로 선 페이지를 잘못 돌리면 멀쩡하던 전사가 통째로 깨진다.
+    if best and votes[best] < 3 * votes.get(0, 0):
+        return 0
+    return best
+
+
+def render_page(doc, page_no: int, dpi: int = 0, max_side: int = 0,
+                rotate: int = 0) -> bytes:
     """열린 fitz 문서의 페이지 하나를 PNG 바이트로 렌더링한다 (1-based).
 
     Pillow가 있으면 긴 변을 max_side로 줄인다 — 요청 크기 제한(413) 대응.
     없으면 렌더 해상도만으로 조절한다(우아한 저하).
+
+    rotate: **시계방향** 추가 회전각(0/90/180/270). PDF의 `/Rotate`와 같은 방향이고,
+        PyMuPDF가 이미 적용하는 `/Rotate` 위에 더 얹는다. 왜 필요한가 — 도면·표가
+        **`/Rotate` 없이 내용만 옆으로 그려진** PDF가 흔하다. 그러면 렌더 결과가
+        누운 채로 나오고 VLM은 "표가 없다"고만 답한다(오류가 아니라 0행이라
+        원인이 안 보인다). 회전은 fitz로 한다 — Pillow가 없어도 동작해야 한다.
     """
     dpi = dpi or VLM_DPI
     max_side = max_side or VLM_MAX_SIDE
-    pix = doc[page_no - 1].get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72))
-    png = pix.tobytes("png")
+    page = doc[page_no - 1]
+    rot = int(rotate) % 360
+    prev = None
+    if rot:
+        # set_rotation은 /Rotate와 같은 시계방향 각도다. 문서를 저장하지 않으므로
+        # 원본 파일은 안 바뀌지만, 같은 doc 객체를 다른 쪽에서 또 쓰므로 되돌린다.
+        prev = page.rotation
+        page.set_rotation((prev + rot) % 360)
+    try:
+        pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72))
+        png = pix.tobytes("png")
+    finally:
+        if prev is not None:
+            page.set_rotation(prev)
     if PIL_AVAILABLE and max_side > 0:
         img = Image.open(io.BytesIO(png))
         if max(img.size) > max_side:
@@ -310,7 +370,10 @@ def ensure_page_image(path: str, page_no: int) -> str:
     try:
         if not 1 <= page_no <= len(doc):
             return ""
-        png = render_page(doc, page_no)
+        # 인덱싱 때 저장한 이미지는 이미 바로 세워져 있다(extract_pdf_pages). 즉석
+        # 렌더링도 같은 판정을 써야 ask_page가 캐시가 있을 때와 없을 때 다른 그림을
+        # 보지 않는다.
+        png = render_page(doc, page_no, rotate=detect_rotation(doc, [page_no]))
     except Exception:  # noqa: BLE001
         return ""
     finally:
@@ -415,9 +478,14 @@ def extract_pdf_pages(
                 pass
 
             text, source, image = layer, "text", ""
+            rot = 0
             if use_vlm:
                 try:
-                    png = render_page(doc, pno, dpi)
+                    # 누운 페이지를 바로 세워 전사한다. 판정은 이 쪽의 글자 방향만
+                    # 보므로(공짜) 쪽마다 따로 한다 — 한 문서 안에서 가로/세로가
+                    # 섞인 도면집이 실제로 있다.
+                    rot = detect_rotation(doc, [pno])
+                    png = render_page(doc, pno, dpi, rotate=rot)
                 except Exception as e:  # noqa: BLE001
                     png = b""
                     notes.append(f"p{pno} 렌더링 실패({type(e).__name__})")
@@ -432,12 +500,20 @@ def extract_pdf_pages(
             if not text:
                 notes.append(f"p{pno} 본문 없음 — 건너뜀")
                 continue
-            pages.append({"page": pno, "text": text, "image": image, "source": source})
+            pages.append({"page": pno, "text": text, "image": image,
+                          "source": source, "rotate": rot})
     finally:
         try:
             doc.close()
         except Exception:  # noqa: BLE001
             pass
+    # 회전은 쪽마다 조용히 일어나므로, 몇 쪽이 누워 있었는지 **한 줄로만** 남긴다.
+    # 쪽마다 알림을 내면 50쪽짜리에서 알림이 본문을 덮어 아무도 안 읽는다.
+    turned = [p["page"] for p in pages if p.get("rotate")]
+    if turned:
+        head = ", ".join(f"p{n}" for n in turned[:8])
+        more = f" 외 {len(turned) - 8}쪽" if len(turned) > 8 else ""
+        notes.append(f"누워 있는 쪽을 돌려서 전사했습니다({head}{more}).")
     return pages, notes
 
 
@@ -474,8 +550,10 @@ def _probe(path: str, page: int, count: int) -> int:
         print("[실패] 본문을 얻지 못했습니다.", file=sys.stderr)
         return 1
     for pg in pages:
+        turn = f" / {pg['rotate']}도 돌림" if pg.get("rotate") else ""
         print(f"\n--- p{pg['page']} ({pg['source']}) "
-              f"{len(pg['text'])}자 / 이미지 {pg['image'] or '없음'} ---", file=sys.stderr)
+              f"{len(pg['text'])}자{turn} / 이미지 {pg['image'] or '없음'} ---",
+              file=sys.stderr)
         print(pg["text"][:3000])
         if len(pg["text"]) > 3000:
             print("…(생략)")

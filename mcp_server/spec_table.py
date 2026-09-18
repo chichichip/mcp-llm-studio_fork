@@ -54,6 +54,28 @@ except Exception as e:  # noqa: BLE001
     _verify = None  # type: ignore[assignment]
     SR_IMPORT_ERROR = str(e)
 
+# spec-reader의 TABLE_PROMPT는 **체결구 도면(MS/AS/NAS)에 맞춰 검증된** 프롬프트라
+# 그대로 둔다(fixtures 회귀 시험이 걸려 있다). 다만 이 저장소는 그 외의 표도 읽는다 —
+# AS568 오링 치수 목록처럼 도면이 아니라 **목록 문서**이고, 컬럼이 기호(H·K)가 아니라
+# 낱말(`I.D. MILLIMETERS`)이며 단위가 인치만이 아니다. 그런 표에 원 프롬프트만 주면
+# "해당하는 표가 없다"로 **0행**이 돌아온다 — 오류가 아니라 빈 결과라 원인이 안 보인다.
+# 그래서 검증된 본문은 건드리지 않고 **호출 직전에 짧은 보충만** 덧붙인다.
+TABLE_PROMPT_EXTRA = """
+
+ALSO IMPORTANT - this document may NOT be a fastener drawing:
+- It may be a size/dimension STANDARD LIST (for example an O-ring size standard).
+  Then the table runs over many pages and the page has no drawing figure at all.
+  Read it anyway - a page that is nothing but table rows is still the table.
+- Column headers may be WORDS, not single letters (for example "I.D. INCHES",
+  "I.D. MILLIMETERS", "W INCHES", "VOLUME"). Use the FULL header text as the key,
+  exactly as printed, INCLUDING the unit word. Do NOT shorten it to a letter and do
+  NOT merge two unit columns into one.
+- Units are not always inches. Keep every value exactly as printed. Never convert.
+- If the page is printed sideways, read it in whatever orientation makes the text
+  upright, and still report the rows.
+"""
+
+
 # 도면 그림의 치수 기호 범례를 읽는 프롬프트.
 #
 # ★ 이게 왜 필요한가: 표 헤더에는 알파벳(H, K, L, T…)만 있고 **그게 무슨 치수인지는
@@ -91,8 +113,12 @@ Return ONLY a JSON object, no markdown fences, no commentary:
 
 # 판독 캐시. 도면 하나당 JSON 하나.
 CACHE_DIR = settings.get("STD_SPEC_CACHE", str(Path(__file__).with_name("spec_cache")))
-# 표를 찾을 때 훑을 최대 쪽 수(치수표는 보통 앞쪽에 있다).
+# 표를 **찾기 위해** 훑을 최대 쪽 수(치수표는 보통 앞쪽에 있다).
 MAX_SCAN_PAGES = settings.get_int("STD_SPEC_MAX_PAGES", 6)
+# 표를 찾은 뒤 **이어서** 읽을 최대 쪽 수. 왜 따로 두는가 — 체결구 도면은 표가 한두
+# 쪽이지만 AS568 같은 치수 목록은 4쪽부터 수십 쪽까지 이어진다. 찾기 창(6쪽)으로
+# 끊으면 표의 앞부분만 읽고 조용히 멈춘다 — 행이 모자란 걸 아무도 못 알아챈다.
+MAX_TABLE_PAGES = settings.get_int("STD_SPEC_MAX_TABLE_PAGES", 40)
 SPEC_EXTS = (".pdf", ".PDF")
 
 
@@ -193,12 +219,59 @@ def _parse_json(text: str) -> dict | None:
     return None
 
 
-def read_table(pdf: str, pages: str = "", refresh: bool = False) -> dict:
+def _parse_pages(spec: str, total: int) -> list[int]:
+    """쪽 지정을 번호 목록으로. "4", "2,3", "4-12", "2 4-6" 을 모두 받는다.
+
+    구간(`4-12`)을 받는 이유: 치수 목록은 "4쪽부터 끝까지"가 흔한데, 그걸 쉼표로
+    일일이 적게 하면 사람이 중간을 빠뜨린다.
+    """
+    out: list[int] = []
+    for tok in re.split(r"[,\s]+", (spec or "").strip()):
+        if not tok:
+            continue
+        m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", tok)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            if a > b:
+                a, b = b, a
+            out.extend(range(a, min(b, total) + 1))
+        elif tok.isdigit():
+            out.append(int(tok))
+    seen: set[int] = set()
+    return [x for x in out if not (x in seen or seen.add(x))]
+
+
+def _scan_pages(doc, targets: list[int], total: int, rot: int,
+                notes: list[str]) -> list[tuple[int, dict]]:
+    """주어진 쪽들을 한 각도로 판독한다. 반환: [(쪽번호, 판독결과)] (0행인 쪽은 뺀다)."""
+    prompt = TABLE_PROMPT + TABLE_PROMPT_EXTRA
+    tag = f"({rot}도)" if rot else ""
+    out: list[tuple[int, dict]] = []
+    for pno in targets:
+        if not 1 <= pno <= total:
+            continue
+        png = vision_ingest.render_page(doc, pno, rotate=rot)
+        raw = vision_ingest.ask_image(png, prompt)
+        parsed = _parse_json(raw or "")
+        n = len(parsed.get("rows", [])) if parsed else 0
+        print(f"  p{pno}{tag} 판독: {n}행", file=sys.stderr)
+        if n:
+            out.append((pno, parsed))
+        elif not rot:
+            notes.append(f"p{pno}에서 표를 찾지 못했습니다")
+    return out
+
+
+def read_table(pdf: str, pages: str = "", refresh: bool = False,
+               rotate: int = -1) -> dict:
     """스펙 PDF의 치수표를 판독한다. 반환: {rows, columns, id_column, pages, notes, ...}
 
-    pages: "2,3" 처럼 쪽을 지정. 비우면 앞쪽부터 MAX_SCAN_PAGES쪽까지 훑어 표가
-    나오는 쪽만 쓴다(치수표는 대개 앞에 있다).
+    pages: "2,3" 또는 "4-12" 처럼 쪽을 지정. 비우면 앞에서부터 MAX_SCAN_PAGES쪽까지
+        훑어 표가 나오는 쪽을 찾고, **찾은 뒤에는 표가 끊길 때까지 이어서** 읽는다
+        (치수 목록은 수십 쪽까지 이어진다).
     refresh=True면 캐시를 무시하고 다시 읽는다.
+    rotate: 시계방향 회전각. -1(기본)이면 자동 — 글자 방향으로 먼저 보고, 그래도
+        한 쪽도 못 읽으면 90도·270도로 다시 시도한다.
     """
     if SR_IMPORT_ERROR:
         raise SpecError(f"판독 모듈을 불러오지 못했습니다: {SR_IMPORT_ERROR}")
@@ -220,31 +293,67 @@ def read_table(pdf: str, pages: str = "", refresh: bool = False) -> dict:
     doc = vision_ingest.fitz.open(pdf)
     try:
         total = len(doc)
-        if pages.strip():
-            targets = [int(x) for x in re.split(r"[,\s]+", pages.strip()) if x.isdigit()]
+        explicit = bool(pages.strip())
+        if explicit:
+            targets = _parse_pages(pages, total)
         else:
             targets = list(range(1, min(total, MAX_SCAN_PAGES) + 1))
-        results, notes = [], []
+        notes: list[str] = []
         for pno in targets:
             if not 1 <= pno <= total:
                 notes.append(f"p{pno}는 이 문서에 없습니다(전체 {total}쪽)")
-                continue
-            png = vision_ingest.render_page(doc, pno)
-            raw = vision_ingest.ask_image(png, TABLE_PROMPT)
-            parsed = _parse_json(raw or "")
-            n = len(parsed.get("rows", [])) if parsed else 0
-            print(f"  p{pno} 판독: {n}행", file=sys.stderr)
-            if n:
-                results.append((pno, parsed))
-            else:
-                notes.append(f"p{pno}에서 표를 찾지 못했습니다")
+
+        # 회전 계획 — 사람이 준 각도 > 글자 방향(공짜) > 0도.
+        if rotate >= 0:
+            plan = [int(rotate) % 360]
+        else:
+            auto = vision_ingest.detect_rotation(doc, targets)
+            if auto:
+                print(f"[진행] 글자 방향으로 보아 {auto}도 돌려 읽습니다.", file=sys.stderr)
+            plan = [auto]
+
+        results = _scan_pages(doc, targets, total, plan[0], notes)
+        used_rot = plan[0]
+
+        # 한 쪽도 못 읽었고 각도를 사람이 지정하지 않았다면, 누운 페이지를 의심한다.
+        # **전멸했을 때만** 재시도한다 — 일부라도 읽혔으면 문서는 바로 선 것이고,
+        # 그때 각도를 더 시도하면 쪽마다 수십 초를 헛되이 더 쓴다.
+        if not results and rotate < 0:
+            for rot in (90, 270, 180):
+                if rot == plan[0]:
+                    continue
+                print(f"[진행] 표를 못 찾아 {rot}도로 돌려 다시 시도합니다.", file=sys.stderr)
+                results = _scan_pages(doc, targets, total, rot, notes)
+                if results:
+                    used_rot = rot
+                    notes.append(f"페이지가 누워 있어 {rot}도 돌려 판독했습니다.")
+                    break
+
+        # 표를 찾았고 쪽을 지정받지 않았다면, **끊길 때까지 이어서** 읽는다.
+        if results and not explicit:
+            pno = max(p for p, _ in results)
+            limit = min(total, pno + MAX_TABLE_PAGES)
+            while pno < limit:
+                pno += 1
+                more = _scan_pages(doc, [pno], total, used_rot, [])
+                if not more:
+                    break
+                results.extend(more)
+            if pno >= limit and limit < total:
+                notes.append(
+                    f"p{limit}까지만 읽었습니다(STD_SPEC_MAX_TABLE_PAGES={MAX_TABLE_PAGES}). "
+                    "표가 더 길면 pages 인자로 범위를 지정하세요."
+                )
     finally:
         doc.close()
 
     if not results:
         raise SpecError(
             f"'{os.path.basename(pdf)}'에서 치수표를 찾지 못했습니다. "
-            "pages 인자로 쪽을 직접 지정해 보세요(예: pages='2,3'). "
+            f"훑어본 쪽: {targets} (전체 {total}쪽). "
+            "표가 그 뒤에 있으면 pages 인자로 지정하세요(예: pages='4-12'). "
+            "CLI로는 python spec_table.py <도면> --dir <폴더> --pages 4-12 --rotate 90 "
+            "처럼 쪽과 각도를 직접 줄 수 있습니다. "
             + ("; ".join(notes[:3]) if notes else "")
         )
 
@@ -256,6 +365,7 @@ def read_table(pdf: str, pages: str = "", refresh: bool = False) -> dict:
         "size": st.st_size,
         "read_at": time.time(),
         "pages_used": [p for p, _ in results],
+        "rotate": used_rot,
         "rows": res.get("rows", []),
         "columns": res.get("columns", []),
         "id_column": res.get("id_column", ""),
@@ -571,8 +681,8 @@ def format_rows(rows: list[dict], columns: list[str] | None = None, limit: int =
 # 시도해도 같은 자리에서 실패한다.** 여기서 미리 한 번 읽어 캐시에 넣어 두면, 이후
 # 앱에서의 호출은 캐시를 읽어 즉시 끝난다.
 #
-#   python spec_table.py --dir C:\rag\vision AS568
-#   python spec_table.py --dir C:\rag\vision AS568 --pages 2,3 --refresh
+#   python spec_table.py AS568 --dir C:\rag\vision
+#   python spec_table.py AS568 --dir C:\rag\vision --pages 4-12 --rotate 90 --refresh
 #
 # 컬럼 이름을 눈으로 확인하는 용도이기도 하다 — select_dash 조건을 그 이름 그대로
 # 적어야 하기 때문이다.
@@ -585,8 +695,11 @@ def _cli() -> int:
         description="스펙 치수표를 미리 판독해 캐시에 넣는다(앱의 호출 제한 밖에서).")
     ap.add_argument("drawing", help="도면번호 또는 품명 (파일 이름의 일부)")
     ap.add_argument("--dir", default="", help="스펙 PDF 폴더 (비우면 STD_SPEC_DIR)")
-    ap.add_argument("--pages", default="", help='쪽 지정 "2,3" (비우면 앞에서부터 훑음)')
+    ap.add_argument("--pages", default="",
+                    help='쪽 지정 "2,3" 또는 "4-12" (비우면 앞에서부터 훑고 이어 읽음)')
     ap.add_argument("--refresh", action="store_true", help="캐시를 무시하고 다시 판독")
+    ap.add_argument("--rotate", type=int, default=-1,
+                    help="시계방향 회전각 0/90/180/270 (기본 자동). 페이지가 누워 있을 때")
     ap.add_argument("--rows", type=int, default=10, help="보여줄 행 수 (기본 10)")
     a = ap.parse_args()
 
@@ -603,10 +716,14 @@ def _cli() -> int:
     print("판독 중… (쪽마다 VLM 호출이라 수십 초 걸릴 수 있습니다)", file=sys.stderr)
 
     t0 = time.time()
-    data = read_table(pdf, pages=a.pages, refresh=a.refresh)
+    data = read_table(pdf, pages=a.pages, refresh=a.refresh, rotate=a.rotate)
     cols = data.get("columns") or []
     rows = data.get("rows") or []
-    print(f"판독 {time.time() - t0:.1f}초, 쪽 {data.get('pages_used')}, 행 {len(rows)}개")
+    rot = data.get("rotate") or 0
+    print(f"판독 {time.time() - t0:.1f}초, 쪽 {data.get('pages_used')}, 행 {len(rows)}개"
+          + (f", 회전 {rot}도" if rot else ""))
+    for n in (data.get("notes") or [])[:5]:
+        print(f"  · {n}")
     print()
     print("컬럼 (select_dash 조건에 이 이름을 그대로 쓰세요):")
     for c in cols:
