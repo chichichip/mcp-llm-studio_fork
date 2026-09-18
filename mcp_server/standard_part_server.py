@@ -501,6 +501,29 @@ def read_spec_table(drawing: str, spec_dir: str = "", name: str = "",
 
 @mcp.tool()
 @std_tool
+def _cond_center(cond) -> float | None:
+    """조건에서 '가까운 후보'를 찾을 기준값 하나를 뽑는다. 숫자가 없으면 None.
+
+    구간 조건(`2.8..3.4`)은 가운데 값을 쓴다. ⚠ 예전에는 `[\d.]+` 로 숫자를 뽑았는데
+    `2.8..3.4` 가 통째로 걸려 float() 이 ValueError 로 죽었다 — 0건일 때만 타는 경로라
+    눈에 잘 안 띄는 자리다.
+    """
+    c = str(cond).strip()
+    m = re.match(r"^\s*(-?[\d.]+)\s*\.\.\s*(-?[\d.]+)\s*$", c)
+    if m:
+        try:
+            return (float(m.group(1)) + float(m.group(2))) / 2
+        except ValueError:
+            return None
+    m = re.match(r"^[<>~=]*\s*(-?\d*\.?\d+)$", c)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
 def select_dash(drawing: str, conditions: dict, spec_dir: str = "", name: str = "",
                 pages: str = "") -> str:
     """치수표에서 **조건에 맞는 부품번호(dash)**를 고릅니다. (🟢 읽기)
@@ -513,14 +536,23 @@ def select_dash(drawing: str, conditions: dict, spec_dir: str = "", name: str = 
     거절합니다(조건이 무시된 채 '전부 통과'가 되면 잘못된 부품을 고르게 되므로).
 
     조건 표기:
-        "0.350"    같은 값
-        "<=0.350"  이하 (셀이 범위면 최대값 기준 — 안전한 쪽)
-        ">=0.20"   이상
-        "~0.35"    셀의 범위가 이 값을 포함 (그립이 체결두께를 받는지 등)
-        ".190-32"  나사 규격 (10-32 처럼 다르게 적혀 있어도 같은 나사면 맞음)
-        "A286"     문자열 부분 일치
+        "2.8..3.4"   **이 구간에 드는 값** ← 치수표에는 이걸 쓰세요
+        "0.350"      정확히 같은 값
+        "<=0.350"    이하 (셀이 범위면 최대값 기준 — 안전한 쪽)
+        ">=0.20"     이상
+        "~0.35"      셀의 범위가 이 값을 포함 (그립이 체결두께를 받는지 등)
+        ".190-32"    나사 규격 (10-32 처럼 다르게 적혀 있어도 같은 나사면 맞음)
+        "A286"       문자열 부분 일치
 
-    예: conditions={"THREAD": ".190-32", "H": "<=0.350"}
+    ⚠ **치수는 구간(`a..b`)으로 물으세요.** 표준품 치수는 이산값이라 "정확히 3.1mm"인
+    행은 대개 없습니다. 점으로 물으면 늘 0건이 나옵니다. 계산한 목표 치수에 허용 범위를
+    씌워 구간으로 주고, 나온 후보 중에서 고르세요.
+
+    예(볼트): conditions={"THREAD": ".190-32", "H": "<=0.350"}
+    예(오링): conditions={"W MILLIMETERS": "2.8..3.4", "I.D. MILLIMETERS": "19.0..19.9"}
+
+    ⚠ 같은 치수가 **단위별로 컬럼이 따로 있으면**(예: "I.D. INCHES" / "I.D. MILLIMETERS")
+    단위까지 붙여 주세요. "I.D." 만 주면 둘 다에 걸려 이 도구가 거절합니다.
 
     ⚠ 맞는 게 없으면 **없다고 답합니다.** 가까운 행을 참고로 보여주지만 그건 선정이
     아닙니다 — 그대로 부품번호로 쓰지 마세요.
@@ -533,7 +565,9 @@ def select_dash(drawing: str, conditions: dict, spec_dir: str = "", name: str = 
         pages: 표가 있는 쪽.
     """
     if not isinstance(conditions, dict) or not conditions:
-        raise StdError('conditions가 비었습니다. 예: {"THREAD": ".190-32", "L": "<=1.5"}')
+        raise StdError('conditions가 비었습니다. '
+                       '예: {"THREAD": ".190-32", "L": "<=1.5"} '
+                       '또는 치수 구간 {"W MILLIMETERS": "2.8..3.4"}')
     pdf = _resolve_spec(drawing, name, spec_dir)
     data = spec_table.read_table(pdf, pages=pages)
     rows = data.get("rows", [])
@@ -566,11 +600,13 @@ def select_dash(drawing: str, conditions: dict, spec_dir: str = "", name: str = 
         out.append(spec_table.format_rows(hits, data.get("columns")))
     else:
         out.append("■ 선정 0건 — 조건에 맞는 부품번호가 없습니다.")
+        out.append("  구간을 너무 좁게 잡았을 수 있습니다. 치수는 이산값이라 "
+                   "`2.8..3.4` 처럼 넉넉히 주는 것이 정상입니다.")
         # 숫자 조건이 걸린 첫 컬럼 기준으로 가까운 행을 참고로 보여준다(선정 아님).
         for k, v in resolved.items():
-            m = re.match(r"^[<>~=]*\s*([\d.]+)$", str(v).strip())
-            if m and k in {c for r in rows for c in r}:
-                near = spec_table.near_rows(rows, k, float(m.group(1)))
+            target = _cond_center(v)
+            if target is not None and k in {c for r in rows for c in r}:
+                near = spec_table.near_rows(rows, k, target)
                 if near:
                     out.append(f"  가까운 후보(선정 아님, {k} 기준):")
                     out.append(spec_table.format_rows(near, data.get("columns")))
