@@ -490,7 +490,7 @@ def read_spec_table(drawing: str, spec_dir: str = "", name: str = "",
     for n in (data.get("notes") or [])[:5]:
         out.append(f"  알림: {n}")
     out.append("")
-    out.append("⚠ 위 치수 기호 설명은 **VLM이 도면 그림을 읽은 것**이라 검증되지 않았습니다. "
+    out.append("⚠ 위 치수 기호 설명은 VLM이 도면 그림을 읽은 것이라 검증되지 않았습니다. "
                "조건을 걸기 전에 어느 기호가 원하는 치수인지 사용자에게 확인하세요 — "
                "기호의 뜻을 추측하지 마세요.")
     out.append('조건으로 좁히려면: select_dash(drawing="{}", conditions={{"기호":"값"}}) '
@@ -552,7 +552,7 @@ def select_dash(drawing: str, conditions: dict, spec_dir: str = "", name: str = 
         out.append("■ 치수 기호 (도면 그림에서 판독)")
         out.append(spec_table.format_legend(legend, cols))
         out.append("")
-        out.append("어느 기호가 원하는 치수인지 확인한 뒤 그 **기호 이름 그대로** 다시 "
+        out.append("어느 기호가 원하는 치수인지 확인한 뒤 그 기호 이름 그대로 다시 "
                    "부르세요. 추측해서 고르면 안 됩니다.")
         return "\n".join(out)
 

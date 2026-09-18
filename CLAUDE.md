@@ -248,7 +248,7 @@ cd llm_studio && python app.py             # 유휴로 시작 — UI에서 모�
 cd llm_studio && python app.py --mock      # 모델 없이 UI 확인 (목 응답)
 ```
 
-**커밋하기 전에 `python check_repo.py`를 돌린다** (표준 라이브러리만, 종료 코드로 실패를 알린다). 아래 규약 중 *글로 적어 두면 지켜질 것 같지만 조용히 깨지는* 것들을 기계가 확인한다 — bat의 CRLF+ASCII, `requirements.txt`의 UTF-8 BOM, 새 dotfile, 100MB 초과 파일, **허용 목록에 없는 호스트**(공개 저장소라 사내 주소가 커밋되면 안 된다), `@mcp.tool()` 함수 안의 stdout `print`(stdio 프로토콜 채널 오염). `--fix`가 줄바꿈·BOM은 고쳐 준다. 새 예시 주소를 쓰려면 `ALLOWED_HOSTS`에 사람이 추가해야 한다 — 그게 의도적으로 걸리적거리는 부분이다.
+**커밋하기 전에 `python check_repo.py`를 돌린다** (표준 라이브러리만, 종료 코드로 실패를 알린다). 아래 규약 중 *글로 적어 두면 지켜질 것 같지만 조용히 깨지는* 것들을 기계가 확인한다 — bat의 CRLF+ASCII, `requirements.txt`의 UTF-8 BOM, 새 dotfile, 100MB 초과 파일, **허용 목록에 없는 호스트**(공개 저장소라 사내 주소가 커밋되면 안 된다), `@mcp.tool()` 함수 안의 stdout `print`(stdio 프로토콜 채널 오염), **도구 응답 문자열 안의 마크다운**(llm_studio가 렌더링하지 않아 별표가 그대로 보인다). `--fix`가 줄바꿈·BOM은 고쳐 준다. 새 예시 주소를 쓰려면 `ALLOWED_HOSTS`에 사람이 추가해야 한다 — 그게 의도적으로 걸리적거리는 부분이다.
 
 이 파일이 존재하는 이유: "bat은 CRLF" 규약이 이 문서에 이미 적혀 있었는데도 bat 7개가 LF로 커밋됐고, 사내 PC에서 `run_rag_server.bat`이 `[Errno 2]`로 죽었다. **규칙이 아니라 검사가 필요하다**는 결론이다. 새 규약을 추가할 때 기계가 볼 수 있는 것이면 여기에도 넣을 것.
 
@@ -259,6 +259,7 @@ cd llm_studio && python app.py --mock      # 모델 없이 UI 확인 (목 응답
 - **모든 코드·주석·docstring·프롬프트는 한국어로 쓴다.** (예외: `.bat`은 전부 영어 ASCII — cmd 인코딩 문제로 한글이 깨진다. 위 mcp_server 절 참고.)
 - **예외보다 우아한 저하** — 라이브러리 없음 → 안내 메시지 반환하는 스텁, MCP 서버 연결 실패 → 그 도구만 비활성, 확장 모듈 로드 실패 → 그것만 건너뜀. 선택적/외부 설정 때문에 프로세스가 죽는 경로를 만들지 말 것.
 - **stdio 트랜스포트에서 stdout은 MCP 프로토콜 채널이다.** 로그는 반드시 stderr로 보낼 것 (`print(..., file=sys.stderr)`).
+- **MCP 도구가 돌려주는 문자열에 마크다운을 쓰지 말 것.** llm_studio는 도구 결과를 `pre.textContent`로 넣어 그대로 보여 준다 — 치수표가 줄바꿈으로 흐트러지면 안 되므로 **일부러 렌더링하지 않는다**. `**강조**`를 쓰면 별표가 화면에 그대로 찍힌다(실제로 경고문 전체가 그렇게 보였다). 모델 답변은 `static/app.js`의 `md()`를 타므로 거기서는 렌더링된다 — 다만 `md()`에 **수식(LaTeX) 지원은 없다.** 도구 설명(docstring)과 서버 `instructions`는 모델이 읽는 것이라 마크다운을 써도 된다. `check_repo.py`가 이 구분을 AST로 검사한다.
 - **Windows 전제** — COM 서버들은 Windows + Office 없이는 의미가 없다. pywin32는 `sys_platform == "win32"` 마커로 걸려 있다.
 - **requirements.txt는 UTF-8 BOM 포함으로 유지할 것** — 한국어 주석이 있는데 구버전 pip는 BOM이 없으면 로케일(cp949)로 읽어 `UnicodeDecodeError`가 난다. 파일을 다시 쓸 때 BOM을 떨어뜨리지 말 것. (파이썬 코드의 파일 I/O는 항상 `encoding="utf-8"` 명시 — 이미 전부 그렇게 돼 있다.)
 - TLS/CA 번들: 외부 HTTPS를 호출하는 모듈은 네트워킹 라이브러리 import 전에 `SSL_CERT_FILE`을 `certifi.where()`로 설정한다 (사내망의 비표준 CA 체인 대응). 폐쇄망 코드에는 해당 없음.

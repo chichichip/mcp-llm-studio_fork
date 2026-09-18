@@ -152,6 +152,45 @@ def check_tool_stdout(paths: list[Path]) -> None:
                                  f"print가 stdout으로 간다 (file=sys.stderr 필요)")
 
 
+def check_tool_markdown(paths: list[Path]) -> None:
+    """도구가 **돌려주는** 문자열에 마크다운을 쓰지 않았나.
+
+    llm_studio는 도구 결과를 `pre.textContent`로 넣어 그대로 보여 준다(치수표가
+    줄바꿈으로 흐트러지면 안 되므로 일부러 렌더링하지 않는다). 그래서 `**강조**`를 쓰면
+    별표가 화면에 그대로 찍힌다 — 실제로 경고문 전체가 그렇게 보였다.
+
+    docstring(도구 설명)과 서버 `instructions`는 **모델이 읽는 것**이라 제외한다.
+    """
+    for p in paths:
+        if p.suffix != ".py" or p.parent.name != "mcp_server" or not p.is_file():
+            continue
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        skip: set[tuple[int, int]] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                d = node.body[0] if node.body else None
+                if (isinstance(d, ast.Expr) and isinstance(d.value, ast.Constant)
+                        and isinstance(d.value.value, str)):
+                    skip.add((d.value.lineno, d.value.col_offset))
+            if isinstance(node, ast.Call):
+                for kw in node.keywords:
+                    if kw.arg == "instructions":
+                        for sub in ast.walk(kw.value):
+                            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                                skip.add((sub.lineno, sub.col_offset))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and "**" in node.value
+                    and (node.lineno, node.col_offset) not in skip):
+                errors.append(
+                    f"{rel(p)}:{node.lineno}: 도구 응답 문자열에 마크다운(**)이 있다 — "
+                    f"llm_studio는 도구 결과를 렌더링하지 않아 별표가 그대로 보인다")
+
+
 def rel(p: Path) -> str:
     try:
         return str(p.relative_to(ROOT)).replace(os.sep, "/")
@@ -170,6 +209,7 @@ def main() -> int:
     check_size(paths)
     check_hosts(paths)
     check_tool_stdout(paths)
+    check_tool_markdown(paths)
 
     for w in warns:
         print(f"  ! {w}")

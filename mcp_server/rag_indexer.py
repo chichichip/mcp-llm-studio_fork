@@ -270,7 +270,7 @@ def _preflight_vision(files: list[str], word_vision: bool) -> None:
         return
     if not vi.FITZ_AVAILABLE:
         print(
-            f"[경고] PyMuPDF가 없어({vi.FITZ_IMPORT_ERROR}) **쪽 이미지를 만들 수 없습니다**.\n"
+            f"[경고] PyMuPDF가 없어({vi.FITZ_IMPORT_ERROR}) 쪽 이미지를 만들 수 없습니다.\n"
             f"        {len(wants)}개 파일이 텍스트 추출로 저하됩니다 — 표·그림은 들어가지 않고\n"
             "        쪽 번호와 ask_page 되짚기도 안 됩니다.\n"
             "        지금 쓰는 파이썬에 설치하세요:\n"
