@@ -67,6 +67,13 @@ RAG_EMBED_API_KEY = ""
 # llama-server를 -b/-ub 작게 띄웠다면 처음부터 낮춰 두는 편이 빠르다.
 # RAG_EMBED_BATCH = "8"
 
+# run_embed_server.bat 이 임베딩 서버를 띄울 때 쓰는 경로. 둘 다 git에 못 넣는 큰 파일이라
+# (100MB 제한) USB 등으로 따로 반입한 자리를 적는다. 비워 두면 bat이 저장소 근처·C:\·홈
+# 폴더의 흔한 자리를 훑어 보고, 못 찾으면 무엇을 적어야 하는지 안내하고 멈춘다.
+# 포트는 여기가 아니라 위 RAG_EMBED_URL에서 가져온다(서버와 검색이 어긋날 수 없게).
+# RAG_EMBED_GGUF   = r"C:\models\embeddinggemma-Q8_0.gguf"
+# RAG_LLAMA_SERVER = r"C:\llama\llama-server.exe"
+
 # ─────────────────────────── 표준품 찾기 (standard_part_server) ───────────────────────────
 # 엔진 적용 표준품 목록 엑셀. 없으면 계열 후보는 나오지만 도면번호가 안 붙는다.
 STD_CATALOG_PATH = r"C:\경로\엔진 적용 표준품 목록.xlsx"
