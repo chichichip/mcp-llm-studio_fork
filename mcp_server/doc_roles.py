@@ -126,10 +126,22 @@ def _text_role(text: str) -> tuple[str, str]:
     return "", ""
 
 
+def _under_spec_dir(key: str) -> bool:
+    """STD_SPEC_DIR 아래인가. 경로 정규화 실패는 '아니다'로 본다(검색을 막지 않는다)."""
+    spec_dir = settings.get("STD_SPEC_DIR", "")
+    if not spec_dir:
+        return False
+    try:
+        r = os.path.normcase(os.path.abspath(spec_dir))
+    except Exception:  # noqa: BLE001
+        return False
+    return key == r or key.startswith(r + os.sep)
+
+
 def role_of(path: str, text: str = "") -> tuple[str, str]:
     """이 문서의 역할과 그렇게 본 근거. 반환: (역할코드, 사유).
 
-    우선순위: 사람이 적은 것 > 스펙 폴더 > 파일명 > 내용.
+    우선순위: 사람이 적은 것 > 내용/파일명 > 스펙 폴더(마지막 수단).
     파일명이 못 정하면 내용이 정하고, **내용이 치수표라고 하면 파일명보다 우선**한다
     (경고를 놓치는 쪽이 한 번 더 붙는 쪽보다 나쁘다).
     """
@@ -147,28 +159,22 @@ def role_of(path: str, text: str = "") -> tuple[str, str]:
                 _cache[key] = out
                 return out
 
-    # ② 스펙 도면 폴더는 명시적 설정이라 자동 판정보다 앞선다.
-    spec_dir = settings.get("STD_SPEC_DIR", "")
-    if spec_dir:
-        try:
-            r = os.path.normcase(os.path.abspath(spec_dir))
-            if key == r or key.startswith(r + os.sep):
-                out = ("table", "STD_SPEC_DIR 아래(스펙 도면)")
-                _cache[key] = out
-                return out
-        except Exception:  # noqa: BLE001 — 경로 정규화 실패가 검색을 막으면 안 된다
-            pass
-
     name_role, name_why = _name_role(path)
     text_role, text_why = _text_role(text) if text else ("", "")
 
-    # ③ 내용이 '치수표'라고 하면 파일명을 이긴다 — 놓치면 경고가 아예 안 붙는다.
+    # ② 내용이 '치수표'라고 하면 파일명을 이긴다 — 놓치면 경고가 아예 안 붙는다.
     if text_role == "table":
         out = ("table", text_why)
     elif name_role:
         out = (name_role, name_why)
     elif text_role:
         out = (text_role, text_why)
+    elif _under_spec_dir(key):
+        # ③ 마지막 수단. **자동 판정보다 뒤에 둔다** — STD_SPEC_DIR을 지침서·설계기준이
+        #    섞인 폴더(예: 인덱싱용 rag 폴더)로 잡는 운용이 실제로 있고, 그때 앞에 두면
+        #    그 폴더의 모든 문서가 '치수표'가 돼 경고가 사방에 붙는다. 경고가 흔해지면
+        #    무시당하므로, 도면만 든 폴더에서 '못 가린 파일'을 건지는 용도로만 쓴다.
+        out = ("table", "STD_SPEC_DIR 아래인데 달리 못 가림")
     else:
         out = ("", "")
     _cache[key] = out
