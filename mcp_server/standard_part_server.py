@@ -473,6 +473,12 @@ def read_spec_table(drawing: str, spec_dir: str = "", name: str = "",
     txt, passed = spec_table.verify_table(data)
 
     out = [f"{os.path.basename(pdf)}" + ("  (캐시된 판독 결과)" if cached else "  (새로 판독)")]
+    # 끝까지 못 읽은 표로 부품을 고르면 잘못된 부품이 나오고 아무도 못 알아챈다.
+    # 경고를 코드가 직접 박아 넣는다 — 프롬프트로 부탁하면 모델이 요약하며 떨어뜨린다.
+    if not data.get("complete", True):
+        out.append("[주의] 이 표는 끝까지 읽지 못했습니다(시간 초과 또는 중단). 아래 "
+                   "행은 표의 일부일 뿐이니 이것만 보고 부품번호를 정하지 마세요. "
+                   "같은 도구를 다시 부르면 읽은 쪽은 캐시에서 쓰고 남은 쪽만 읽습니다.")
     if data.get("table_title"):
         out.append(f"표: {data['table_title']}")
     out.append(f"쪽: {', '.join(map(str, data.get('pages_used', [])))} / "

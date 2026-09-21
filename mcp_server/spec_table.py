@@ -116,9 +116,13 @@ CACHE_DIR = settings.get("STD_SPEC_CACHE", str(Path(__file__).with_name("spec_ca
 # 표를 **찾기 위해** 훑을 최대 쪽 수(치수표는 보통 앞쪽에 있다).
 MAX_SCAN_PAGES = settings.get_int("STD_SPEC_MAX_PAGES", 6)
 # 표를 찾은 뒤 **이어서** 읽을 최대 쪽 수. 왜 따로 두는가 — 체결구 도면은 표가 한두
-# 쪽이지만 AS568 같은 치수 목록은 4쪽부터 수십 쪽까지 이어진다. 찾기 창(6쪽)으로
+# 쪽이지만 AS568 같은 치수 목록은 3쪽부터 수십 쪽까지 이어진다. 찾기 창(6쪽)으로
 # 끊으면 표의 앞부분만 읽고 조용히 멈춘다 — 행이 모자란 걸 아무도 못 알아챈다.
 MAX_TABLE_PAGES = settings.get_int("STD_SPEC_MAX_TABLE_PAGES", 40)
+# 한 번에 쓸 수 있는 시간(초). 넘으면 **읽은 데까지 저장하고 멈춘다** — 다시 돌리면
+# 캐시에서 이어간다. 사내 게이트웨이는 쪽당 수십 초라 40쪽이면 30분이 넘는데, 끝이
+# 언제인지 모르는 채 기다리다 창을 닫아 버리는 게 실제로 일어났다.
+TIME_BUDGET = settings.get_float("STD_SPEC_TIME_BUDGET", 1800)
 SPEC_EXTS = (".pdf", ".PDF")
 
 
@@ -204,6 +208,56 @@ def _save_cache(pdf: str, data: dict) -> None:
         print(f"[주의] 판독 캐시 저장 실패({e}) — 다음에 다시 읽습니다.", file=sys.stderr)
 
 
+# ─────────────────── 쪽 단위 캐시 (중간에 끊겨도 잃지 않게) ───────────────────
+# 왜 쪽마다 저장하는가: 사내 게이트웨이는 쪽당 수십 초라 20쪽이면 10분이 넘는다.
+# 판독이 다 끝난 뒤에 한 번만 저장하면 **중간에 Ctrl+C 하거나 창을 닫는 순간 그
+# 시간이 통째로 날아가고**, 다시 돌려도 같은 자리에서 또 기다려야 한다 — 실제로
+# 그렇게 잃었다. 쪽마다 적어 두면 어디서 끊기든 다음 실행이 이어간다.
+#
+# 회전각별로 따로 담는다. 각도를 바꿔 재시도할 때 앞서 읽은 것을 버리지 않기 위해서다.
+
+
+def _page_cache_path(pdf: str) -> Path:
+    return _cache_path(pdf).with_name(_cache_path(pdf).stem + "_pages.json")
+
+
+def _load_pages(pdf: str) -> dict[int, dict[int, dict]]:
+    """{회전각: {쪽번호: 판독결과}}. 원본이 바뀌었으면 버린다."""
+    f = _page_cache_path(pdf)
+    if not f.is_file():
+        return {}
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        st = os.stat(pdf)
+        if data.get("mtime") != st.st_mtime or data.get("size") != st.st_size:
+            return {}
+        return {int(rot): {int(p): v for p, v in pages.items()}
+                for rot, pages in (data.get("pages") or {}).items()}
+    except Exception:  # noqa: BLE001 — 깨진 캐시는 없는 셈 친다
+        return {}
+
+
+def _save_pages(pdf: str, cache: dict[int, dict[int, dict]]) -> None:
+    """쪽 캐시를 파일에 쓴다. 못 써도 판독은 계속한다(우아한 저하)."""
+    try:
+        st = os.stat(pdf)
+        f = _page_cache_path(pdf)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(
+            {"pdf": os.path.abspath(pdf), "mtime": st.st_mtime, "size": st.st_size,
+             "pages": {str(rot): {str(p): v for p, v in pages.items()}
+                       for rot, pages in cache.items()}},
+            ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        print(f"[주의] 쪽 캐시 저장 실패({e}) — 중간에 끊기면 다시 읽어야 합니다.",
+              file=sys.stderr)
+
+
+def _mmss(sec: float) -> str:
+    m, s = divmod(int(max(0, sec)), 60)
+    return f"{m}분 {s}초" if m else f"{s}초"
+
+
 def _parse_json(text: str) -> dict | None:
     t = re.sub(r"^```(?:json)?\s*", "", (text or "").strip())
     t = re.sub(r"\s*```$", "", t)
@@ -241,25 +295,72 @@ def _parse_pages(spec: str, total: int) -> list[int]:
     return [x for x in out if not (x in seen or seen.add(x))]
 
 
-def _scan_pages(doc, targets: list[int], total: int, rot: int,
-                notes: list[str]) -> list[tuple[int, dict]]:
-    """주어진 쪽들을 한 각도로 판독한다. 반환: [(쪽번호, 판독결과)] (0행인 쪽은 뺀다)."""
-    prompt = TABLE_PROMPT + TABLE_PROMPT_EXTRA
-    tag = f"({rot}도)" if rot else ""
-    out: list[tuple[int, dict]] = []
-    for pno in targets:
-        if not 1 <= pno <= total:
-            continue
-        png = vision_ingest.render_page(doc, pno, rotate=rot)
-        raw = vision_ingest.ask_image(png, prompt)
-        parsed = _parse_json(raw or "")
-        n = len(parsed.get("rows", [])) if parsed else 0
-        print(f"  p{pno}{tag} 판독: {n}행", file=sys.stderr)
-        if n:
-            out.append((pno, parsed))
-        elif not rot:
-            notes.append(f"p{pno}에서 표를 찾지 못했습니다")
-    return out
+class _Scanner:
+    """쪽을 하나씩 판독하며 **쪽마다 캐시에 적는다.**
+
+    캐시에 있는 쪽은 VLM을 아예 안 부른다 — 끊겼다 다시 돌리면 남은 쪽만 읽는다.
+    `force`를 주면 그 쪽만 다시 읽는다(오독한 한 쪽만 고쳐 넣는 용도).
+
+    시간 예산을 넘기면 `stopped`를 세우고 멈춘다. 읽은 데까지는 이미 저장돼 있어
+    다시 돌리면 이어간다 — 끝이 언제인지 모르는 채 기다리다 창을 닫는 것보다 낫다.
+    """
+
+    def __init__(self, doc, total: int, pdf: str, cache: dict, budget: float):
+        self.doc, self.total, self.pdf, self.cache = doc, total, pdf, cache
+        self.t0 = time.time()
+        self.budget = budget
+        self.stopped = False
+        self.vlm_calls = 0          # 실제로 VLM을 부른 횟수(캐시 적중은 안 센다)
+        self.vlm_time = 0.0
+
+    # 쪽당 평균 소요(초). 아직 한 번도 안 불렀으면 0.
+    @property
+    def per_page(self) -> float:
+        return self.vlm_time / self.vlm_calls if self.vlm_calls else 0.0
+
+    def left(self) -> float:
+        return self.budget - (time.time() - self.t0)
+
+    def page(self, pno: int, rot: int, force: bool = False) -> dict:
+        """이 쪽의 판독 결과({rows:[...]}). 캐시에 있으면 그걸 쓴다."""
+        store = self.cache.setdefault(rot, {})
+        if not force and pno in store:
+            got = store[pno]
+            n = len(got.get("rows") or [])
+            print(f"  p{pno}{f'({rot}도)' if rot else ''} 판독: {n}행 (캐시)",
+                  file=sys.stderr)
+            return got
+
+        t = time.time()
+        png = vision_ingest.render_page(self.doc, pno, rotate=rot)
+        raw = vision_ingest.ask_image(png, TABLE_PROMPT + TABLE_PROMPT_EXTRA)
+        took = time.time() - t
+        self.vlm_calls += 1
+        self.vlm_time += took
+
+        parsed = _parse_json(raw or "") or {}
+        n = len(parsed.get("rows") or [])
+        store[pno] = parsed
+        _save_pages(self.pdf, self.cache)      # ★ 쪽마다 저장 — 끊겨도 안 잃는다
+        print(f"  p{pno}{f'({rot}도)' if rot else ''} 판독: {n}행 "
+              f"({took:.0f}초, 누적 {_mmss(time.time() - self.t0)})", file=sys.stderr)
+        return parsed
+
+    def scan(self, pnos, rot: int, notes: list[str], force: bool = False):
+        """여러 쪽을 판독한다. 반환: [(쪽번호, 판독결과)] — 0행인 쪽은 뺀다."""
+        out: list[tuple[int, dict]] = []
+        for pno in pnos:
+            if not 1 <= pno <= self.total:
+                continue
+            if self.left() <= 0:
+                self.stopped = True
+                break
+            parsed = self.page(pno, rot, force=force)
+            if parsed.get("rows"):
+                out.append((pno, parsed))
+            elif not rot:
+                notes.append(f"p{pno}에서 표를 찾지 못했습니다")
+        return out
 
 
 def read_table(pdf: str, pages: str = "", refresh: bool = False,
@@ -269,9 +370,13 @@ def read_table(pdf: str, pages: str = "", refresh: bool = False,
     pages: "2,3" 또는 "4-12" 처럼 쪽을 지정. 비우면 앞에서부터 MAX_SCAN_PAGES쪽까지
         훑어 표가 나오는 쪽을 찾고, **찾은 뒤에는 표가 끊길 때까지 이어서** 읽는다
         (치수 목록은 수십 쪽까지 이어진다).
-    refresh=True면 캐시를 무시하고 다시 읽는다.
+    refresh=True면 캐시를 무시하고 다시 읽는다. **pages와 같이 주면 그 쪽만** 다시
+        읽고 나머지 쪽은 캐시를 쓴다 — 한 쪽을 오독했을 때 그것만 고쳐 넣는 길이다.
     rotate: 시계방향 회전각. -1(기본)이면 자동 — 글자 방향으로 먼저 보고, 그래도
         한 쪽도 못 읽으면 90도·270도로 다시 시도한다.
+
+    쪽 단위 캐시를 쓰므로 중간에 끊겨도(Ctrl+C·시간 예산 초과) 읽은 쪽은 남는다.
+    다시 부르면 남은 쪽만 읽는다.
     """
     if SR_IMPORT_ERROR:
         raise SpecError(f"판독 모듈을 불러오지 못했습니다: {SR_IMPORT_ERROR}")
@@ -291,68 +396,104 @@ def read_table(pdf: str, pages: str = "", refresh: bool = False,
         raise SpecError(f"VLM 서버에 연결하지 못했습니다 — {why}")
 
     doc = vision_ingest.fitz.open(pdf)
+    notes: list[str] = []
+    cache = _load_pages(pdf)
     try:
         total = len(doc)
         explicit = bool(pages.strip())
-        if explicit:
-            targets = _parse_pages(pages, total)
-        else:
-            targets = list(range(1, min(total, MAX_SCAN_PAGES) + 1))
-        notes: list[str] = []
+        targets = (_parse_pages(pages, total) if explicit
+                   else list(range(1, min(total, MAX_SCAN_PAGES) + 1)))
         for pno in targets:
             if not 1 <= pno <= total:
                 notes.append(f"p{pno}는 이 문서에 없습니다(전체 {total}쪽)")
 
         # 회전 계획 — 사람이 준 각도 > 글자 방향(공짜) > 0도.
         if rotate >= 0:
-            plan = [int(rotate) % 360]
+            rot = int(rotate) % 360
         else:
-            auto = vision_ingest.detect_rotation(doc, targets)
-            if auto:
-                print(f"[진행] 글자 방향으로 보아 {auto}도 돌려 읽습니다.", file=sys.stderr)
-            plan = [auto]
+            rot = vision_ingest.detect_rotation(doc, targets)
+            if rot:
+                print(f"[진행] 글자 방향으로 보아 {rot}도 돌려 읽습니다.", file=sys.stderr)
 
-        results = _scan_pages(doc, targets, total, plan[0], notes)
-        used_rot = plan[0]
+        done = len(cache.get(rot, {}))
+        if done:
+            print(f"[진행] 이미 읽어 둔 {done}쪽은 캐시에서 씁니다"
+                  " (다시 읽으려면 --refresh).", file=sys.stderr)
+        print("[진행] 멈추려면 Ctrl+C — 읽은 쪽은 저장돼 다음 실행이 이어갑니다.",
+              file=sys.stderr)
 
-        # 한 쪽도 못 읽었고 각도를 사람이 지정하지 않았다면, 누운 페이지를 의심한다.
-        # **전멸했을 때만** 재시도한다 — 일부라도 읽혔으면 문서는 바로 선 것이고,
-        # 그때 각도를 더 시도하면 쪽마다 수십 초를 헛되이 더 쓴다.
-        if not results and rotate < 0:
-            for rot in (90, 270, 180):
-                if rot == plan[0]:
-                    continue
-                print(f"[진행] 표를 못 찾아 {rot}도로 돌려 다시 시도합니다.", file=sys.stderr)
-                results = _scan_pages(doc, targets, total, rot, notes)
-                if results:
-                    used_rot = rot
-                    notes.append(f"페이지가 누워 있어 {rot}도 돌려 판독했습니다.")
-                    break
+        scan = _Scanner(doc, total, pdf, cache, TIME_BUDGET)
+        try:
+            # ① 찾기 — 앞쪽을 훑어 표가 어디서 시작하는지 본다.
+            #    refresh면 지정한 쪽(없으면 찾기 창)을 강제로 다시 읽는다.
+            results = scan.scan(targets, rot, notes, force=refresh)
 
-        # 표를 찾았고 쪽을 지정받지 않았다면, **끊길 때까지 이어서** 읽는다.
-        if results and not explicit:
-            pno = max(p for p, _ in results)
-            limit = min(total, pno + MAX_TABLE_PAGES)
-            while pno < limit:
-                pno += 1
-                more = _scan_pages(doc, [pno], total, used_rot, [])
-                if not more:
-                    break
-                results.extend(more)
-            if pno >= limit and limit < total:
-                notes.append(
-                    f"p{limit}까지만 읽었습니다(STD_SPEC_MAX_TABLE_PAGES={MAX_TABLE_PAGES}). "
-                    "표가 더 길면 pages 인자로 범위를 지정하세요."
-                )
+            # ② 한 쪽도 못 읽었고 각도를 사람이 지정하지 않았다면 누운 페이지를 의심한다.
+            #    **전멸했을 때만** 각도를 바꾼다 — 일부라도 읽혔으면 문서는 바로 선
+            #    것이고, 그때 각도를 더 시도하면 쪽마다 수십 초를 헛되이 더 쓴다.
+            if not results and rotate < 0 and not scan.stopped:
+                for alt in (90, 270, 180):
+                    if alt == rot:
+                        continue
+                    print(f"[진행] 표를 못 찾아 {alt}도로 돌려 다시 시도합니다.",
+                          file=sys.stderr)
+                    results = scan.scan(targets, alt, notes)
+                    if results:
+                        rot = alt
+                        notes.append(f"페이지가 누워 있어 {alt}도 돌려 판독했습니다.")
+                        break
+                    if scan.stopped:
+                        break
+
+            # ③ 이어읽기 — 표가 끊기는 쪽까지. 쪽을 직접 지정받았으면 하지 않는다.
+            if results and not explicit and not scan.stopped:
+                pno = max(p for p, _ in results)
+                limit = min(total, pno + MAX_TABLE_PAGES)
+                if pno < limit:
+                    left = limit - pno
+                    est = (f" — 남은 {left}쪽이면 약 {_mmss(left * scan.per_page)}"
+                           if scan.per_page else "")
+                    print(f"[진행] p{min(p for p, _ in results)}부터 표가 이어집니다. "
+                          f"끊길 때까지 계속 읽습니다(최대 p{limit}){est}.",
+                          file=sys.stderr)
+                while pno < limit:
+                    pno += 1
+                    more = scan.scan([pno], rot, [])
+                    if scan.stopped or not more:
+                        break
+                    results.extend(more)
+                if pno >= limit and limit < total:
+                    notes.append(
+                        f"p{limit}까지만 읽었습니다"
+                        f"(STD_SPEC_MAX_TABLE_PAGES={MAX_TABLE_PAGES}). "
+                        "표가 더 길면 pages 인자로 범위를 지정하세요."
+                    )
+        except KeyboardInterrupt:
+            # 읽은 쪽은 이미 파일에 있다. 여기서 끝내지 말고 **가진 것으로 결과를
+            # 만들어** 돌려준다 — 10분 기다린 사람에게 아무것도 안 주면 안 된다.
+            print("\n[중단] Ctrl+C — 지금까지 읽은 쪽으로 정리합니다.", file=sys.stderr)
+            notes.append("Ctrl+C로 중단했습니다. 다시 돌리면 남은 쪽을 이어 읽습니다.")
+            scan.stopped = True
+
+        if scan.stopped:
+            notes.append(
+                f"끝까지 읽지 못했습니다(시간 예산 {_mmss(TIME_BUDGET)} 또는 중단). "
+                "같은 명령을 다시 돌리면 캐시에서 이어갑니다."
+            )
+        # 결과는 **캐시 전체**에서 모은다 — 이번에 읽은 쪽과 지난 실행에서 읽어 둔
+        # 쪽이 함께 들어가야 이어 돌리기가 실제로 이어진다.
+        results = [(pno, got) for pno, got in sorted(cache.get(rot, {}).items())
+                   if (got or {}).get("rows")]
     finally:
+        _save_pages(pdf, cache)
         doc.close()
 
     if not results:
         raise SpecError(
             f"'{os.path.basename(pdf)}'에서 치수표를 찾지 못했습니다. "
             f"훑어본 쪽: {targets} (전체 {total}쪽). "
-            "표가 그 뒤에 있으면 pages 인자로 지정하세요(예: pages='4-12'). "
-            "CLI로는 python spec_table.py <도면> --dir <폴더> --pages 4-12 --rotate 90 "
+            "표가 그 뒤에 있으면 pages 인자로 지정하세요(예: pages='3-12'). "
+            "CLI로는 python spec_table.py <도면> --dir <폴더> --pages 3-12 --rotate 90 "
             "처럼 쪽과 각도를 직접 줄 수 있습니다. "
             + ("; ".join(notes[:3]) if notes else "")
         )
@@ -365,14 +506,19 @@ def read_table(pdf: str, pages: str = "", refresh: bool = False,
         "size": st.st_size,
         "read_at": time.time(),
         "pages_used": [p for p, _ in results],
-        "rotate": used_rot,
+        "rotate": rot,
+        "complete": not scan.stopped,
         "rows": res.get("rows", []),
         "columns": res.get("columns", []),
         "id_column": res.get("id_column", ""),
         "table_title": res.get("table_title", ""),
         "notes": notes + list(mnotes or []),
     }
-    _save_cache(pdf, data)
+    # 끝까지 못 읽은 결과는 **최종 캐시에 넣지 않는다** — 넣으면 다음 호출이 "이미
+    # 다 읽었다"고 보고 모자란 표를 그대로 쓴다. 쪽 캐시는 이미 저장돼 있어 이어
+    # 돌리는 데는 지장이 없다.
+    if not scan.stopped:
+        _save_cache(pdf, data)
     return data
 
 
@@ -682,13 +828,19 @@ def format_rows(rows: list[dict], columns: list[str] | None = None, limit: int =
 # 앱에서의 호출은 캐시를 읽어 즉시 끝난다.
 #
 #   python spec_table.py AS568 --dir C:\rag\vision
-#   python spec_table.py AS568 --dir C:\rag\vision --pages 4-12 --rotate 90 --refresh
+#   python spec_table.py AS568 --dir C:\rag\vision --pages 3-12 --rotate 90
+#
+# 쪽 단위로 캐시하므로 **중간에 끊겨도(Ctrl+C·시간 초과) 읽은 쪽은 남는다** — 같은
+# 명령을 다시 돌리면 남은 쪽만 읽는다. 한 쪽만 오독했으면 그 쪽만 다시 읽어 고친다:
+#
+#   python spec_table.py AS568 --dir C:\rag\vision --pages 3 --refresh
 #
 # 컬럼 이름을 눈으로 확인하는 용도이기도 하다 — select_dash 조건을 그 이름 그대로
 # 적어야 하기 때문이다.
 
 
 def _cli() -> int:
+    global TIME_BUDGET
     import argparse
 
     ap = argparse.ArgumentParser(
@@ -701,6 +853,9 @@ def _cli() -> int:
     ap.add_argument("--rotate", type=int, default=-1,
                     help="시계방향 회전각 0/90/180/270 (기본 자동). 페이지가 누워 있을 때")
     ap.add_argument("--rows", type=int, default=10, help="보여줄 행 수 (기본 10)")
+    ap.add_argument("--budget", type=float, default=0,
+                    help=f"이번 실행에 쓸 최대 시간(초, 기본 {TIME_BUDGET:.0f}). "
+                         "넘으면 읽은 데까지 저장하고 멈춘다 — 다시 돌리면 이어간다")
     a = ap.parse_args()
 
     folder = a.dir or settings.get("STD_SPEC_DIR", "")
@@ -715,6 +870,9 @@ def _cli() -> int:
     print(f"파일: {pdf}")
     print("판독 중… (쪽마다 VLM 호출이라 수십 초 걸릴 수 있습니다)", file=sys.stderr)
 
+    if a.budget:
+        TIME_BUDGET = a.budget
+
     t0 = time.time()
     data = read_table(pdf, pages=a.pages, refresh=a.refresh, rotate=a.rotate)
     cols = data.get("columns") or []
@@ -722,8 +880,13 @@ def _cli() -> int:
     rot = data.get("rotate") or 0
     print(f"판독 {time.time() - t0:.1f}초, 쪽 {data.get('pages_used')}, 행 {len(rows)}개"
           + (f", 회전 {rot}도" if rot else ""))
-    for n in (data.get("notes") or [])[:5]:
+    for n in (data.get("notes") or [])[:8]:
         print(f"  · {n}")
+    if not data.get("complete", True):
+        print()
+        print("[주의] 끝까지 읽지 못했습니다. 같은 명령을 다시 돌리세요 — 읽은 쪽은")
+        print("  캐시에 있어 남은 쪽만 읽습니다. 아래 표도 그만큼 모자랍니다.")
+        print(f"  (쪽 캐시: {_page_cache_path(pdf)})")
     print()
     print("컬럼 (select_dash 조건에 이 이름을 그대로 쓰세요):")
     for c in cols:
