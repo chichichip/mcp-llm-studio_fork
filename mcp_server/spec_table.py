@@ -253,6 +253,22 @@ def _save_pages(pdf: str, cache: dict[int, dict[int, dict]]) -> None:
               file=sys.stderr)
 
 
+def _collect(cache: dict[int, dict[int, dict]]):
+    """쪽 캐시에서 실제 결과를 모은다. 반환: ([(쪽, 판독결과)], {쪽: 쓴 각도}).
+
+    쪽마다 각도가 다를 수 있으므로 회전각을 가리지 않고 모으되, 같은 쪽이 여러
+    각도로 있으면 **행이 있는 것**을 쓴다 — 0행은 '표가 없다'가 아니라 '그 각도로는
+    못 읽었다'는 뜻일 뿐이다.
+    """
+    best: dict[int, dict] = {}
+    used: dict[int, int] = {}
+    for r in sorted(cache):
+        for pno, got in cache[r].items():
+            if (got or {}).get("rows") and pno not in best:
+                best[pno], used[pno] = got, r
+    return sorted(best.items()), used
+
+
 def _mmss(sec: float) -> str:
     m, s = divmod(int(max(0, sec)), 60)
     return f"{m}분 {s}초" if m else f"{s}초"
@@ -305,13 +321,33 @@ class _Scanner:
     다시 돌리면 이어간다 — 끝이 언제인지 모르는 채 기다리다 창을 닫는 것보다 낫다.
     """
 
-    def __init__(self, doc, total: int, pdf: str, cache: dict, budget: float):
+    def __init__(self, doc, total: int, pdf: str, cache: dict, budget: float,
+                 fixed_rot: int = -1):
         self.doc, self.total, self.pdf, self.cache = doc, total, pdf, cache
         self.t0 = time.time()
         self.budget = budget
+        self.fixed_rot = fixed_rot  # 사람이 준 각도(-1이면 쪽마다 자동 판정)
         self.stopped = False
         self.vlm_calls = 0          # 실제로 VLM을 부른 횟수(캐시 적중은 안 센다)
         self.vlm_time = 0.0
+        self.failed: dict[int, int] = {}   # 0행이 난 쪽 → 그때 쓴 각도
+        self.learned_rot = 0               # 이 문서에서 실제로 통한 각도
+
+    def rot_for(self, pno: int) -> int:
+        """이 쪽을 몇 도로 돌려 읽을까. **쪽마다 따로 정한다.**
+
+        ⚠ 예전에는 찾기 창 전체(1~6쪽)를 한 번에 판정했는데, 그러면 **표지·목차의
+          가로쓰기가 누운 치수표를 표결에서 이겨** 0도가 나왔다. 한 쪽만 지정하면
+          맞고 여러 쪽을 주면 틀리는, 원인이 안 보이는 실패였다(실제로 겪었다).
+          판정은 텍스트 레이어만 보므로 쪽마다 해도 VLM 비용이 0이다.
+        """
+        if self.fixed_rot >= 0:
+            return self.fixed_rot
+        got = vision_ingest.detect_rotation(self.doc, [pno])
+        # 텍스트 레이어가 없어 못 가린 쪽(0)은, 이 문서에서 **이미 통한 각도**가
+        # 있으면 그걸 쓴다 — 스캔본은 쪽마다 판정이 안 되므로 한 번 배운 걸
+        # 물려주지 않으면 되살린 다음 쪽부터 또 0도로 되돌아간다.
+        return got or self.learned_rot
 
     # 쪽당 평균 소요(초). 아직 한 번도 안 불렀으면 0.
     @property
@@ -346,8 +382,13 @@ class _Scanner:
               f"({took:.0f}초, 누적 {_mmss(time.time() - self.t0)})", file=sys.stderr)
         return parsed
 
-    def scan(self, pnos, rot: int, notes: list[str], force: bool = False):
-        """여러 쪽을 판독한다. 반환: [(쪽번호, 판독결과)] — 0행인 쪽은 뺀다."""
+    def scan(self, pnos, notes: list[str], force: bool = False, rot: int = -1):
+        """여러 쪽을 판독한다. 반환: [(쪽번호, 판독결과)] — 0행인 쪽은 뺀다.
+
+        rot을 주면 그 각도로, 안 주면 `rot_for`가 쪽마다 정한다.
+        0행이 나온 쪽은 `self.failed`에 (쪽, 그때 쓴 각도)로 쌓인다 — 나중에 다른
+        각도로 되살릴 수 있게.
+        """
         out: list[tuple[int, dict]] = []
         for pno in pnos:
             if not 1 <= pno <= self.total:
@@ -355,11 +396,14 @@ class _Scanner:
             if self.left() <= 0:
                 self.stopped = True
                 break
-            parsed = self.page(pno, rot, force=force)
+            use = rot if rot >= 0 else self.rot_for(pno)
+            parsed = self.page(pno, use, force=force)
             if parsed.get("rows"):
                 out.append((pno, parsed))
-            elif not rot:
-                notes.append(f"p{pno}에서 표를 찾지 못했습니다")
+                self.failed.pop(pno, None)
+            else:
+                self.failed[pno] = use
+                notes.append(f"p{pno}에서 표를 찾지 못했습니다({use}도)")
         return out
 
 
@@ -407,43 +451,63 @@ def read_table(pdf: str, pages: str = "", refresh: bool = False,
             if not 1 <= pno <= total:
                 notes.append(f"p{pno}는 이 문서에 없습니다(전체 {total}쪽)")
 
-        # 회전 계획 — 사람이 준 각도 > 글자 방향(공짜) > 0도.
-        if rotate >= 0:
-            rot = int(rotate) % 360
-        else:
-            rot = vision_ingest.detect_rotation(doc, targets)
-            if rot:
-                print(f"[진행] 글자 방향으로 보아 {rot}도 돌려 읽습니다.", file=sys.stderr)
+        # 회전은 **쪽마다** 정한다(_Scanner.rot_for). 찾기 창 전체를 한 번에
+        # 판정하면 표지의 가로쓰기가 누운 치수표를 이겨 버린다 — 아래 참고.
+        scan = _Scanner(doc, total, pdf, cache, TIME_BUDGET,
+                        fixed_rot=int(rotate) % 360 if rotate >= 0 else -1)
 
-        done = len(cache.get(rot, {}))
+        done = len(cache.get(0, {})) + sum(len(v) for k, v in cache.items() if k)
         if done:
             print(f"[진행] 이미 읽어 둔 {done}쪽은 캐시에서 씁니다"
                   " (다시 읽으려면 --refresh).", file=sys.stderr)
         print("[진행] 멈추려면 Ctrl+C — 읽은 쪽은 저장돼 다음 실행이 이어갑니다.",
               file=sys.stderr)
 
-        scan = _Scanner(doc, total, pdf, cache, TIME_BUDGET)
         try:
             # ① 찾기 — 앞쪽을 훑어 표가 어디서 시작하는지 본다.
-            #    refresh면 지정한 쪽(없으면 찾기 창)을 강제로 다시 읽는다.
-            results = scan.scan(targets, rot, notes, force=refresh)
+            results = scan.scan(targets, notes, force=refresh)
 
-            # ② 한 쪽도 못 읽었고 각도를 사람이 지정하지 않았다면 누운 페이지를 의심한다.
-            #    **전멸했을 때만** 각도를 바꾼다 — 일부라도 읽혔으면 문서는 바로 선
-            #    것이고, 그때 각도를 더 시도하면 쪽마다 수십 초를 헛되이 더 쓴다.
-            if not results and rotate < 0 and not scan.stopped:
+            # ② 못 읽은 쪽 되살리기 — **한 문서에 한 번만.**
+            #
+            # ⚠ 왜 이렇게 바꿨나: 예전에는 "한 쪽도 못 읽었을 때만" 다른 각도를
+            #   시도했다. 그런데 누운 문서에서 **어쩌다 한 쪽이 0도로 읽히면**
+            #   그 한 쪽이 재시도를 통째로 막아, 나머지 표 쪽이 전부 0행인 채로
+            #   끝났다. 한 쪽만 지정하면 되는데 여러 쪽을 주면 안 되던 원인이다.
+            #
+            # 표가 나온 쪽 **바로 옆**의 못 읽은 쪽을 골라 다른 각도를 시험한다.
+            # 이어지는 표일 가능성이 높아 표적이 정확하고, 통하면 그 각도로 못 읽은
+            # 쪽을 한꺼번에 되살린다. 실패해도 비용은 최대 세 번이다.
+            #
+            # 단, **글자 방향을 이미 아는 쪽은 건드리지 않는다.** 텍스트 레이어가
+            # 방향을 말해 주는 쪽이 0행이라면 그건 회전 문제가 아니라 그냥 표가 없는
+            # 쪽이다(표지·목차). 거기에 각도를 더듬으면 쪽당 수십 초를 그냥 버린다.
+            blind = [p for p in sorted(scan.failed)
+                     if not vision_ingest.text_dir_known(doc, p)]
+            if blind and rotate < 0 and not scan.stopped:
+                ok = {p for p, _ in results}
+                probe = next((p for p in blind if (p - 1) in ok or (p + 1) in ok), None)
+                probe = probe or max(blind)
+                tried = scan.failed[probe]
                 for alt in (90, 270, 180):
-                    if alt == rot:
+                    if alt == tried or scan.stopped:
                         continue
-                    print(f"[진행] 표를 못 찾아 {alt}도로 돌려 다시 시도합니다.",
-                          file=sys.stderr)
-                    results = scan.scan(targets, alt, notes)
-                    if results:
-                        rot = alt
-                        notes.append(f"페이지가 누워 있어 {alt}도 돌려 판독했습니다.")
-                        break
-                    if scan.stopped:
-                        break
+                    print(f"[진행] p{probe}를 {alt}도로 돌려 시험합니다 "
+                          f"({tried}도로는 표를 못 찾았습니다).", file=sys.stderr)
+                    if not scan.scan([probe], [], rot=alt):
+                        continue
+                    notes.append(f"페이지가 누워 있어 {alt}도 돌려 판독했습니다"
+                                 f"(p{probe}는 {tried}도로 안 읽혔습니다).")
+                    scan.learned_rot = alt          # 이후 쪽도 이 각도로
+                    rest = [p for p in blind if p != probe and p in scan.failed]
+                    if rest:
+                        print(f"[진행] 같은 각도로 못 읽은 쪽을 다시 읽습니다: "
+                              f"{', '.join('p' + str(p) for p in rest)}", file=sys.stderr)
+                        scan.scan(rest, notes, rot=alt)
+                    # 되살린 쪽이 results에 들어가야 이어읽기가 **표의 끝**에서
+                    # 시작한다. 안 그러면 원래 읽혔던 한 쪽 다음부터 읽어, 바로
+                    # 다음 쪽이 0행이면 거기서 멈춰 버린다.
+                    results, _u = _collect(cache)
+                    break
 
             # ③ 이어읽기 — 표가 끊기는 쪽까지. 쪽을 직접 지정받았으면 하지 않는다.
             if results and not explicit and not scan.stopped:
@@ -458,7 +522,7 @@ def read_table(pdf: str, pages: str = "", refresh: bool = False,
                           file=sys.stderr)
                 while pno < limit:
                     pno += 1
-                    more = scan.scan([pno], rot, [])
+                    more = scan.scan([pno], [])
                     if scan.stopped or not more:
                         break
                     results.extend(more)
@@ -481,9 +545,16 @@ def read_table(pdf: str, pages: str = "", refresh: bool = False,
                 "같은 명령을 다시 돌리면 캐시에서 이어갑니다."
             )
         # 결과는 **캐시 전체**에서 모은다 — 이번에 읽은 쪽과 지난 실행에서 읽어 둔
-        # 쪽이 함께 들어가야 이어 돌리기가 실제로 이어진다.
-        results = [(pno, got) for pno, got in sorted(cache.get(rot, {}).items())
-                   if (got or {}).get("rows")]
+        # 쪽이 함께 들어가야 이어 돌리기가 실제로 이어진다. 쪽마다 각도가 다를 수
+        # 있으므로 회전각을 가리지 않고 모으되, 같은 쪽이 여러 각도로 있으면
+        # **행이 있는 것**을 쓴다(0행은 '그 각도로는 못 읽었다'는 뜻일 뿐이다).
+        results, used = _collect(cache)
+        # 대표 회전각 = 읽힌 쪽들에서 가장 많이 쓰인 각도(응답·캐시 표시용).
+        rot = max(set(used.values()), key=list(used.values()).count) if used else 0
+        turned = sorted(p for p, r in used.items() if r != rot)
+        if turned:
+            notes.append("다른 각도로 읽은 쪽: "
+                         + ", ".join(f"p{p}({used[p]}도)" for p in turned[:8]))
     finally:
         _save_pages(pdf, cache)
         doc.close()

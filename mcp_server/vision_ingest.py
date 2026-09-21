@@ -247,18 +247,8 @@ def _cache_dir_for(path: str) -> Path:
     return Path(PAGE_IMAGE_DIR) / f"{stem}_{h}"
 
 
-def detect_rotation(doc, pages) -> int:
-    """글자 방향으로 본 이 페이지들의 회전각(시계방향). 모르면 0. **VLM을 안 부른다.**
-
-    왜 필요한가: PyMuPDF는 페이지의 `/Rotate`는 알아서 적용하지만, 도면·치수표는
-    **`/Rotate` 없이 내용만 옆으로 그려진** PDF가 흔하다(CAD 출력·스캔본). 그러면
-    렌더 결과가 누운 채 나오고 VLM은 "표가 없다"고만 답한다 — 오류가 아니라 빈
-    결과라 화면만 봐서는 원인이 안 보인다(AS568 치수표가 실제로 그랬다).
-
-    텍스트 레이어의 `dir`(글자 진행 방향)로 공짜로 알아낸다. 스캔본처럼 텍스트
-    레이어가 없으면 0을 돌려주므로, 그건 호출부가 0행일 때 각도를 바꿔 다시
-    부르는 쪽으로 처리한다(우아한 저하).
-    """
+def _dir_votes(doc, pages) -> dict[int, int]:
+    """텍스트 레이어의 글자 방향을 세어 {회전각: 표수}로. 레이어가 없으면 빈 사전."""
     votes: dict[int, int] = {}
     for pno in list(pages)[:4]:                  # 앞 몇 쪽이면 방향은 충분히 보인다
         try:
@@ -277,6 +267,35 @@ def detect_rotation(doc, pages) -> int:
                 else:
                     continue
                 votes[rot] = votes.get(rot, 0) + len(line.get("spans", []) or [1])
+    return votes
+
+
+def text_dir_known(doc, page_no: int) -> bool:
+    """이 쪽의 글자 방향을 텍스트 레이어로 알 수 있나. 스캔본·빈 쪽이면 False.
+
+    호출부가 **VLM으로 각도를 더듬어 볼 가치가 있는 쪽인지** 가리는 데 쓴다.
+    방향을 이미 아는 쪽을 다른 각도로 또 부르는 건 쪽당 수십 초를 그냥 버리는 것이다.
+    """
+    return bool(_dir_votes(doc, [page_no]))
+
+
+def detect_rotation(doc, pages) -> int:
+    """글자 방향으로 본 이 페이지들의 회전각(시계방향). 모르면 0. **VLM을 안 부른다.**
+
+    왜 필요한가: PyMuPDF는 페이지의 `/Rotate`는 알아서 적용하지만, 도면·치수표는
+    **`/Rotate` 없이 내용만 옆으로 그려진** PDF가 흔하다(CAD 출력·스캔본). 그러면
+    렌더 결과가 누운 채 나오고 VLM은 "표가 없다"고만 답한다 — 오류가 아니라 빈
+    결과라 화면만 봐서는 원인이 안 보인다(AS568 치수표가 실제로 그랬다).
+
+    ⚠ **여러 쪽을 한 번에 넘기지 말 것.** 표지·목차의 가로쓰기가 누운 치수표를
+      표결에서 이겨 0도가 나온다 — 한 쪽만 지정하면 맞고 여러 쪽을 주면 틀리는,
+      원인이 안 보이는 실패가 실제로 났다. 인제스트도 치수표 판독도 `[pno]` 하나씩
+      넘긴다. 판정은 텍스트 레이어만 보므로 쪽마다 해도 비용이 0이다.
+
+    스캔본(텍스트 레이어 없음)은 여기서 못 가린다 — 그건 호출부가 0행일 때
+    각도를 바꿔 다시 부르는 쪽으로 처리한다(우아한 저하).
+    """
+    votes = _dir_votes(doc, pages)
     if not votes:
         return 0
     best = max(votes, key=lambda k: votes[k])
