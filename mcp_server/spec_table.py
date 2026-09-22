@@ -1055,7 +1055,7 @@ def _cli() -> int:
     ap.add_argument("--rotate", type=int, default=-1,
                     help="시계방향 회전각 0/90/180/270 (기본 자동). 페이지가 누워 있을 때")
     ap.add_argument("--plain", action="store_true",
-                    help="JSON 판독을 건너뛰고 **표를 그대로 옮겨 적게** 한다. "
+                    help="JSON 판독을 건너뛰고 표를 그대로 옮겨 적게 한다. "
                          "도면이 아니라 치수 목록 문서(AS568 등)에서 확실한 길")
     ap.add_argument("--rows", type=int, default=10, help="보여줄 행 수 (기본 10)")
     ap.add_argument("--budget", type=float, default=0,
