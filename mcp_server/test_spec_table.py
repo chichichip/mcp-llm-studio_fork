@@ -338,5 +338,40 @@ bad += check(data["rows"][0]["dash"] == "400", f"dash → {data['rows'][0]['dash
 # 표가 없는 쪽에서 전사를 두 번 부르지는 않는지(비용)
 bad += check(calls2.count((1, "plain")) <= 1, "표 없는 쪽도 전사는 한 번만")
 
+
+print("\n--plain — JSON을 아예 건너뛴다 (확실한 길)")
+calls3 = []
+
+
+def plain_only(png, prompt):
+    pno, _rot = (int(x) for x in png.decode().split(":"))
+    kind = "plain" if "Transcribe" in prompt else "json"
+    calls3.append((pno, kind))
+    if pno not in tp:
+        return "NO TABLE"
+    return md_page(pno) if kind == "plain" else "I can't find that table."
+
+
+install(FakeDoc(14, (1.0, 0.0)), tp, 0, [])
+st.vision_ingest.ask_image = plain_only
+st.vision_ingest.ask_image_detail = lambda png, pr: (plain_only(png, pr), "")
+f = st._page_cache_path(PDF)
+if f.exists():
+    f.unlink()
+d1 = st.read_table(PDF, plain=True)
+bad += check(all(k == "plain" for _p, k in calls3), "--plain 이면 JSON을 한 번도 안 부른다")
+bad += check(len(d1["rows"]) == 30 * len(d1["pages_used"]), f"{len(d1['rows'])}행")
+
+# 자동 학습: JSON이 한 번 거절당하면 남은 쪽은 전사로 바로 간다(쪽당 한 번).
+calls3.clear()
+f.unlink()
+d2 = st.read_table(PDF)
+# 표가 처음 나온 쪽에서 "JSON은 안 먹고 전사는 먹는다"를 배우면, 그 뒤로는
+# JSON을 다시 묻지 않는다 — 쪽당 수십 초를 매번 버리지 않기 위한 보장이다.
+tbl = [p for p, k in calls3 if k == "json"]
+bad += check(max(tbl) <= min(tp),
+             f"표가 처음 나온 p{min(tp)} 뒤로는 JSON을 안 묻는다 (물은 쪽: {tbl})")
+bad += check(d2["pages_used"] == d1["pages_used"], "결과는 --plain 과 같다")
+
 print(f"\n{'실패 ' + str(bad) + '건' if bad else '전부 통과'}")
 sys.exit(1 if bad else 0)

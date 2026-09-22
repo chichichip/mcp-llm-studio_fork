@@ -385,7 +385,7 @@ class _Scanner:
     """
 
     def __init__(self, doc, total: int, pdf: str, cache: dict, budget: float,
-                 fixed_rot: int = -1):
+                 fixed_rot: int = -1, plain: bool = False):
         self.doc, self.total, self.pdf, self.cache = doc, total, pdf, cache
         self.t0 = time.time()
         self.budget = budget
@@ -395,6 +395,7 @@ class _Scanner:
         self.vlm_time = 0.0
         self.failed: dict[int, int] = {}   # 0행이 난 쪽 → 그때 쓴 각도
         self.learned_rot = 0               # 이 문서에서 실제로 통한 각도
+        self.prefer_plain = plain          # JSON을 건너뛰고 표 전사로 바로 간다
 
     def rot_for(self, pno: int) -> int:
         """이 쪽을 몇 도로 돌려 읽을까. **쪽마다 따로 정한다.**
@@ -435,12 +436,20 @@ class _Scanner:
         tag = f"({rot}도)" if rot else ""
 
         # ① 검증된 JSON 경로부터. 체결구 도면은 이쪽이 가장 정확하다.
-        raw, why = vision_ingest.ask_image_detail(
-            png, TABLE_PROMPT + TABLE_PROMPT_EXTRA)
-        self.vlm_calls += 1
-        got_json = _parse_json(raw or "")
-        parsed = got_json or {}
-        self._dump(pno, rot, "json", raw, why)
+        #
+        # 단 `prefer_plain` 이면 건너뛴다 — 사람이 --plain 을 줬거나, 이 문서에서
+        # 이미 "JSON은 거절당하고 전사는 된다"가 확인된 경우다. 한 번 확인됐는데도
+        # 쪽마다 JSON을 또 물으면 **쪽당 수십 초를 매번 버린다**(20쪽이면 10분).
+        parsed: dict = {}
+        got_json = None
+        why = ""
+        if not self.prefer_plain:
+            raw, why = vision_ingest.ask_image_detail(
+                png, TABLE_PROMPT + TABLE_PROMPT_EXTRA)
+            self.vlm_calls += 1
+            got_json = _parse_json(raw or "")
+            parsed = got_json or {}
+            self._dump(pno, rot, "json", raw, why)
 
         # ② 안 나오면 **표만 그대로 옮겨 적게** 하고 우리가 행으로 바꾼다.
         #    같은 쪽이 마크다운 전사로는 멀쩡히 읽히는 것을 실측으로 확인했다 —
@@ -451,21 +460,29 @@ class _Scanner:
         #   다시 묻는 건 쪽당 수십 초를 그냥 버리는 것이다. 되묻는 경우는 **모델이
         #   형식을 안 지켰을 때**뿐 — 산문으로 거절했거나, 잘렸거나, 호출이 실패한
         #   때다. 그게 우리가 실제로 겪은 실패의 모양이다.
-        if not parsed.get("rows") and (got_json is None or why):
-            if why:
+        if not parsed.get("rows") and (self.prefer_plain or got_json is None or why):
+            if self.prefer_plain:
+                pass                        # 이미 아는 길이라 조용히 간다
+            elif why:
                 print(f"  p{pno}{tag} JSON 경로 실패: {why}", file=sys.stderr)
             elif raw is not None:
                 head = " ".join((raw or "").split())[:80]
                 print(f"  p{pno}{tag} JSON 경로가 표를 안 줬습니다"
                       f'{f" — 응답 앞부분: {head}" if head else " (빈 응답)"}',
                       file=sys.stderr)
-            print(f"  p{pno}{tag} 표 전사로 다시 시도합니다…", file=sys.stderr)
+            else:
+                print(f"  p{pno}{tag} 표 전사로 다시 시도합니다…", file=sys.stderr)
             raw2, why2 = vision_ingest.ask_image_detail(png, PLAIN_TABLE_PROMPT)
             self.vlm_calls += 1
             self._dump(pno, rot, "plain", raw2, why2)
             got = _rows_from_markdown(raw2 or "")
             if got:
                 parsed = got
+                if not self.prefer_plain:
+                    # 이 문서는 JSON이 안 먹고 전사가 먹는다 — 남은 쪽은 바로 전사로.
+                    self.prefer_plain = True
+                    print("  → 이 문서는 표 전사 경로를 씁니다(JSON은 건너뜁니다).",
+                          file=sys.stderr)
             elif why2:
                 print(f"  p{pno}{tag} 표 전사도 실패: {why2}", file=sys.stderr)
 
@@ -518,7 +535,7 @@ class _Scanner:
 
 
 def read_table(pdf: str, pages: str = "", refresh: bool = False,
-               rotate: int = -1) -> dict:
+               rotate: int = -1, plain: bool = False) -> dict:
     """스펙 PDF의 치수표를 판독한다. 반환: {rows, columns, id_column, pages, notes, ...}
 
     pages: "2,3" 또는 "4-12" 처럼 쪽을 지정. 비우면 앞에서부터 MAX_SCAN_PAGES쪽까지
@@ -564,7 +581,11 @@ def read_table(pdf: str, pages: str = "", refresh: bool = False,
         # 회전은 **쪽마다** 정한다(_Scanner.rot_for). 찾기 창 전체를 한 번에
         # 판정하면 표지의 가로쓰기가 누운 치수표를 이겨 버린다 — 아래 참고.
         scan = _Scanner(doc, total, pdf, cache, TIME_BUDGET,
-                        fixed_rot=int(rotate) % 360 if rotate >= 0 else -1)
+                        fixed_rot=int(rotate) % 360 if rotate >= 0 else -1,
+                        plain=plain)
+        if plain:
+            print("[진행] 표 전사 경로로 읽습니다(JSON 판독은 건너뜁니다).",
+                  file=sys.stderr)
 
         done = len(cache.get(0, {})) + sum(len(v) for k, v in cache.items() if k)
         if done:
@@ -1033,6 +1054,9 @@ def _cli() -> int:
     ap.add_argument("--refresh", action="store_true", help="캐시를 무시하고 다시 판독")
     ap.add_argument("--rotate", type=int, default=-1,
                     help="시계방향 회전각 0/90/180/270 (기본 자동). 페이지가 누워 있을 때")
+    ap.add_argument("--plain", action="store_true",
+                    help="JSON 판독을 건너뛰고 **표를 그대로 옮겨 적게** 한다. "
+                         "도면이 아니라 치수 목록 문서(AS568 등)에서 확실한 길")
     ap.add_argument("--rows", type=int, default=10, help="보여줄 행 수 (기본 10)")
     ap.add_argument("--budget", type=float, default=0,
                     help=f"이번 실행에 쓸 최대 시간(초, 기본 {TIME_BUDGET:.0f}). "
@@ -1055,7 +1079,8 @@ def _cli() -> int:
         TIME_BUDGET = a.budget
 
     t0 = time.time()
-    data = read_table(pdf, pages=a.pages, refresh=a.refresh, rotate=a.rotate)
+    data = read_table(pdf, pages=a.pages, refresh=a.refresh, rotate=a.rotate,
+                      plain=a.plain)
     cols = data.get("columns") or []
     rows = data.get("rows") or []
     rot = data.get("rotate") or 0
