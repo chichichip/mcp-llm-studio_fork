@@ -44,3 +44,12 @@ rag_docs/*
 # 폐쇄망 오프라인 설치용 wheel 모음 (install_requirements.bat이 여기서 설치).
 # .whl은 대용량이고 USB 등으로 반입하므로 git에 넣지 않는다.
 wheelhouse/
+
+# 표준품 선정 실행 시트 (사내 규격 번호·문서번호·엑셀 경로가 들어간다).
+# README와 형식 설명용 example_*.md만 남기고 제외 — rag_docs와 같은 취지.
+playbooks/*
+!playbooks/README.md
+!playbooks/example_*.md
+
+# 표준품 선정 진행 상태와 결과서 (standard_server.py가 생성하는 런타임 산출물).
+standard_sessions/

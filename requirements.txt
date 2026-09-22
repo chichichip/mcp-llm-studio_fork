@@ -37,3 +37,7 @@ qdrant-client
 # 없으면 서버는 뜨되 모든 도구가 안내만 반환한다 (우아한 저하).
 # ANSYS MAPDL 본체 + 라이선스도 별도로 필요하다 (PyMAPDL은 클라이언트일 뿐).
 # ansys-mapdl-core
+
+# standard_server.py / standard_core.py — 표준품 선정 실행 시트 진행.
+# 추가 의존성이 없다 (fastmcp + 표준 라이브러리만). 시트 파싱·조건 판정·세션 저장을
+# 전부 stdlib(ast/json/re)로 처리하므로 폐쇄망 반입에 걸릴 게 없다.

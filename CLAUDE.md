@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 두 층으로 이루어져 있고, **둘의 성격이 완전히 다르다**.
 
-1. **반입물 (repo가 추적하는 것)** — `mcp_server/`의 MCP 서버들과 그 실행용 `run_*.bat`, `llm_studio/`(앱 + `serve_llm.py`), RAG 학습 문서 투입 폴더 `rag_docs/`, 루트의 `install_requirements.bat`. 사내 폐쇄망에서 실제로 돌릴 코드다. 여기가 이 저장소의 본체다. (폴더 규약: 서버 코드와 실행 bat은 `mcp_server/`에, LLM 서빙은 `llm_studio/`에, 오프라인 설치와 공용 `venv/`만 루트에 둔다.)
+1. **반입물 (repo가 추적하는 것)** — `mcp_server/`의 MCP 서버들과 그 실행용 `run_*.bat`, `llm_studio/`(앱 + `serve_llm.py`), RAG 학습 문서 투입 폴더 `rag_docs/`, 표준품 선정 실행 시트 투입 폴더 `playbooks/`, 루트의 `install_requirements.bat`. 사내 폐쇄망에서 실제로 돌릴 코드다. 여기가 이 저장소의 본체다. (폴더 규약: 서버 코드와 실행 bat은 `mcp_server/`에, LLM 서빙은 `llm_studio/`에, 오프라인 설치와 공용 `venv/`만 루트에 둔다.)
 2. **강의 자료 (`Examples/`, `.gitignore`로 제외됨)** — LangChain/LangGraph 한국어 코스("AITF")의 랩 노트북과 봇 하니스. **git에 올라가지 않으므로 clone한 곳에는 존재하지 않는다.** 개발 PC에만 있는 참고 자료이고, 루트 코드가 여기에 의존하지 않는다.
 
 `Examples/`를 수정하는 작업은 커밋되지 않는다는 점을 항상 염두에 둘 것.
@@ -28,7 +28,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### `mcp_server/` — MCP 서버 모음
 
-MCP 서버(office/outlook/catia/rag/ansys/pdf)와 스모크 테스트, **그리고 그 실행용 bat이 전부 이 폴더에 있다**. `run_office_server.bat`·`run_outlook_server.bat`·`run_catia_server.bat`·`run_rag_server.bat`·`run_ansys_server.bat`·`run_pdf_server.bat`이 각각을 띄우는 실행 파일이다 — **인자 없이(더블클릭) 실행하면 HTTP 트랜스포트**로 뜨고, 인자를 주면 그대로 전달한다(`run_office_server.bat --transport stdio`). RAG 인덱스 구성 CLI는 `run_rag_indexer.bat`이 따로 있다. bat들은 자기 폴더로 `cd`한 뒤 같은 폴더의 `*.py`를 부르고, 파이썬은 **루트의 공용 `venv/`를 `..\venv\Scripts\python.exe`로** 찾는다(없으면 시스템 python) — 이 상대경로(`..\venv`)를 깨지 말 것. `rag_core.py`는 `office_server.py`를, `test_outlook.py`는 `outlook_server.py`를 같은 폴더에서 import하므로 **파이썬 파일을 폴더 밖으로 따로 옮기면 깨진다**(RAG 코드가 mcp_server를 못 떠나는 이유 — 학습에 넣을 문서만 루트 `rag_docs/`에 둔다). bat 파일은 **CRLF 줄바꿈 + 영어 ASCII만** 유지할 것 — LF로 저장하면 cmd가 줄 경계를 잘못 잘라 주석 조각을 명령으로 실행하고, 한글은 콘솔 코드페이지(cp949)와 파일 인코딩(UTF-8)이 어긋나 깨진다.
+MCP 서버(office/outlook/catia/rag/ansys/pdf/standard)와 스모크 테스트, **그리고 그 실행용 bat이 전부 이 폴더에 있다**. `run_office_server.bat`·`run_outlook_server.bat`·`run_catia_server.bat`·`run_rag_server.bat`·`run_ansys_server.bat`·`run_pdf_server.bat`·`run_standard_server.bat`이 각각을 띄우는 실행 파일이다 — **인자 없이(더블클릭) 실행하면 HTTP 트랜스포트**로 뜨고, 인자를 주면 그대로 전달한다(`run_office_server.bat --transport stdio`). RAG 인덱스 구성 CLI는 `run_rag_indexer.bat`이 따로 있다. bat들은 자기 폴더로 `cd`한 뒤 같은 폴더의 `*.py`를 부르고, 파이썬은 **루트의 공용 `venv/`를 `..\venv\Scripts\python.exe`로** 찾는다(없으면 시스템 python) — 이 상대경로(`..\venv`)를 깨지 말 것. `rag_core.py`는 `office_server.py`를, `test_outlook.py`는 `outlook_server.py`를 같은 폴더에서 import하므로 **파이썬 파일을 폴더 밖으로 따로 옮기면 깨진다**(RAG 코드가 mcp_server를 못 떠나는 이유 — 학습에 넣을 문서만 루트 `rag_docs/`에 둔다). `standard_server.py`는 같은 폴더의 `standard_core.py`를 import하고, 선정 실행 시트만 루트 `playbooks/`에 둔다 — 같은 규약이다. bat 파일은 **CRLF 줄바꿈 + 영어 ASCII만** 유지할 것 — LF로 저장하면 cmd가 줄 경계를 잘못 잘라 주석 조각을 명령으로 실행하고, 한글은 콘솔 코드페이지(cp949)와 파일 인코딩(UTF-8)이 어긋나 깨진다.
 
 ### `mcp_server/office_server.py` / `outlook_server.py` — COM 기반 MCP 서버
 
@@ -89,6 +89,30 @@ PyMAPDL(`ansys-mapdl-core`, gRPC)로 MAPDL을 조종해 열해석(정상상태·
 - **word_com은 hang-safe**다: Word의 'PDF를 편집 가능한 문서로 변환' 확인창은 `DisplayAlerts=0`으로 안 꺼지므로(개발 PC 재현), Open을 데몬 스레드에서 돌리고 워치독이 그 대화상자를 자동 확인하며 `WORD_TIMEOUT`(기본 90초) 초과 시 **우리가 띄운 Word PID만**(생성 전후 차집합) taskkill한다 — 사용자 Word는 건드리지 않고, 막혀도 MCP 서버가 얼지 않는다.
 - ⚠ 실기 검증 대상: DRM이 **Word.exe에 .pdf 복호화까지 허용하는지**(확장자 스코프 DRM이면 막힐 수 있음), 대화상자 자동 확인이 실기에서 실제로 통하는지. **서버 없이 `python mcp_server\pdf_server.py --probe <PDF경로>`로 각 백엔드를 진단**할 것. 개발 PC엔 실제 DRM이 없어(nProtect만 상주) word_com의 성공 여부는 사내 PC에서만 확정된다. `pypdf`는 `llm_studio`가 이미 쓰던 것을 루트 requirements.txt에 추가했다.
 
+### `mcp_server/standard_core.py` · `standard_server.py` — 표준품 선정 실행 시트 (구성·서빙 분리)
+
+표준품(O-ring·볼트 등) 선정을 **선정 실행 시트(playbook)** 대로 한 단계씩 진행시키는 MCP 서버.
+
+**왜 이 구조인가.** 선정 지침서를 RAG에 통째로 넣고 도구를 잔뜩 쥐여 주면, 모델이 매 턴 "지금 어떤 도구를 써야 하나 / 어떤 스펙 문서를 봐야 하나"를 다시 추론하다 헤맨다. 그래서 순서를 바꾼다 — `사내 지침서 → (사내 AI가 1회) → 실행 시트(.md) → 서버가 단계별 진행`. 시트를 한 장 만들어 두면 그 다음부터 모델은 **고르지 않고 따라가기만** 한다. 단계마다 서버가 "받을 입력 / 쓸 도구 / 볼 표 / 열 엑셀 / 기록할 항목 / 다음에 호출할 도구"를 통째로 찍어 주기 때문이다.
+
+- `standard_core.py` — 시트 파서 + 선정 상태기계. 실행 파일 아님. **fastmcp를 import하지 않는다** — 파싱·조건 판정·세션을 표준 라이브러리만으로 처리해서, fastmcp 없이도 그냥 `python -c "import standard_core"`로 돌려 검증할 수 있게 한 의도적 분리다(rag_core/rag_server와 같은 구성·서빙 분리). 설정(`PLAYBOOK_DIR`·`STATE_DIR`·`REPORT_DIR`)은 CLI가 덮어쓰므로 다른 모듈에서는 `core.PLAYBOOK_DIR`처럼 **매번 속성으로** 읽는다.
+- `standard_server.py` — MCP 도구 껍데기 + CLI. `run_standard_server.bat`, stdio 기본, http/sse는 :8093. `--lint`(시트 점검)·`--list`·`--show`로 MCP 없이도 쓴다.
+- 시트는 루트 **`playbooks/`**(형식·사내 AI용 프롬프트는 `playbooks/README.md`). 실제 시트에는 사내 규격 번호·문서번호·엑셀 경로가 들어가므로 `.gitignore`가 README와 `example_*.md`만 남기고 제외한다 — rag_docs와 같은 취지고, **실제 시트는 사내에서 만들어 사내에 둔다**(개인 PC에서 만들어 옮길 물건이 아니다).
+
+**서버가 실제로 막는 것** (이게 존재 이유다):
+- **분기를 모델이 판단하지 않는다.** ` ```판단 ` 블록의 조건식을 수집된 값으로 **계산**한다("온도 -30~204 이내인가?"가 감이 아니라 산수가 된다). `eval`이 아니라 `ast` 화이트리스트 해석기 — 함수 호출·속성 접근은 거부한다. 선언된 값인데 아직 안 모였으면 판정을 **거부**한다(추측으로 넘어가지 않게).
+- **필수 입력/기록이 비면 다음 단계로 넘어가지 않는다.** 확정 불가는 `미정`으로 명시해야 통과하고, 결과서에 미해결 항목으로 남는다.
+- **단위를 자동 환산한다.** `number(bar)`로 선언한 값에 `150 psi`를 넣으면 bar로 바꿔 기록한다(psi로 받은 압력이 bar 기준 조건식에 그대로 들어가는 사고 방지).
+- 끝나면 판단 근거가 붙은 **선정 결과서(.md)**가 `standard_sessions/reports/`에 남는다(세션 JSON은 `standard_sessions/` — 둘 다 gitignore).
+
+**3티어**: 🟢 조회(`list_playbooks`·`show_playbook`·`lookup_table`·`current_step`·`selection_report`·`list_selections`) / 🟡 진행(`start_selection`·`submit_step`·`back_step` — 자기 데이터 폴더에만 쓴다) / 🔴 `delete_selection`(confirm 게이트, outlook과 같은 `_preview`).
+
+**여기서 스펙을 읽지 않는 건 의도적이다.** 표준품마다 자동화 도구가 있는 것도 아니고(특히 Dash No. 결정), 시트는 ` ```도구 ` 블록으로 "`docs__search_docs`로 이 문서를 찾아라"라고 **지정만** 하고 실제 읽기는 기존 서버(rag/office/pdf)가 한다. ` ```엑셀 ` 블록도 같다 — 세션 값으로 시트를 골라(`장착방식 == Axial -> Sheet3`) `office__read_excel_range(...)` 호출문을 찍어 줄 뿐, COM으로 직접 열지 않는다(통합문서 구조가 표준품마다 다르고 매크로가 걸린 것도 있어서 office_server에 맡기는 게 안전하다). 같은 일을 여기서 다시 구현하지 말 것.
+
+**우아한 저하** — 기계 판독 블록이 하나도 없는 산문 시트도 그대로 동작한다(산문을 지시문으로 넘기고 모델의 판단을 기록). 어느 단계가 자동 판정이고 어느 단계가 자유 판단으로 남는지는 `--lint`가 `자동판정`/`산문만`으로 보여 준다. 사내 AI가 만든 시트를 넣으면 **먼저 `--lint`부터** 돌릴 것.
+
+⚠ `playbooks/example_rubber_oring.md`는 **형식 설명용 예시**다. 규격 번호(`AS83485`/`AS834485` 표기가 섞여 있었다)·온도 범위·대체규격표·엑셀 경로는 전부 사내 지침서 원문으로 교체·검수해야 한다.
+
 ### `llm_studio/serve_llm.py` — 헤드리스 LLM 서빙
 
 로컬 GGUF 모델을 llama.cpp의 `llama-server`로 띄워 OpenAI 호환 API(`/v1/chat/completions`)를 여는 CLI 스크립트. LangChain·n8n·HTML 페이지 등이 `base_url`만 바꿔 붙는 용도다. 표준 라이브러리만 쓰므로 pip 의존성이 없고, 대신 `llama-server` 실행 파일과 `.gguf`를 별도 반입해야 한다. (LLM 서빙 관련 코드를 한곳에 모으려고 앱과 같은 `llm_studio/`에 둔다.)
@@ -138,10 +162,11 @@ LangChain/LangGraph 한국어 코스. 번호순 랩 노트북(01 tool calling �
 pip install -r requirements.txt
 python mcp_server\office_server.py                    # stdio
 python mcp_server\office_server.py --transport http   # n8n용, :8087
-python mcp_server\outlook_server.py --transport http  # n8n용, :8088 (catia :8089, rag :8090, ansys :8091, pdf :8092)
+python mcp_server\outlook_server.py --transport http  # n8n용, :8088 (catia :8089, rag :8090, ansys :8091, pdf :8092, standard :8093)
 python mcp_server\test_outlook.py                     # 읽기 전용 스모크 테스트
 mcp_server\run_office_server.bat                      # 위 http 실행의 더블클릭용 (서버별, mcp_server 안)
 mcp_server\run_rag_indexer.bat ..\rag_docs            # RAG 인덱스 구성 (rag_docs 투입, 서빙은 내리고 실행)
+mcp_server\run_standard_server.bat --lint            # 표준품 선정 시트 점검 (시트를 새로 넣으면 먼저 이것부터)
 
 # 로컬 LLM
 python llm_studio\serve_llm.py --model C:/models/gemma-12b-it-qat.gguf
