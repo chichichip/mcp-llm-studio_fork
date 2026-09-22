@@ -101,6 +101,15 @@ Rules:
 If this page has no table at all, output exactly: NO TABLE
 """
 
+# 쪽을 위아래로 나눠 읽을 때, 아래 칸에는 **머리글이 없다**(머리글은 맨 위 칸에만
+# 있다). 위 칸에서 얻은 컬럼 이름을 알려 줘야 같은 표로 이어 붙일 수 있다.
+BAND_PROMPT_TAIL = """
+
+NOTE: this image is the CONTINUATION of a table that started above, so the header row
+may be missing or cut off. Use EXACTLY these column headers, in this order:
+{columns}
+Output the header row anyway, then the data rows you can see."""
+
 
 def _rows_from_markdown(text: str) -> dict | None:
     """마크다운 표(`| a | b |`)를 판독 결과 모양으로 바꾼다. 표가 없으면 None.
@@ -109,7 +118,13 @@ def _rows_from_markdown(text: str) -> dict | None:
     구분선(`|---|---|`)과 헤더가 되풀이되는 줄은 버린다 — 좌우 그룹을 이어 붙이면
     가운데에 헤더가 한 번 더 끼는 경우가 있다.
     """
-    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip().startswith("|")]
+    # 잘린 응답은 마지막 줄이 도중에 끊겨 있다. 그 줄만 버리고 **앞의 온전한 행은
+    # 건진다** — 잘렸다고 통째로 버리면 어차피 다시 읽어야 하고, 부분이라도 있으면
+    # 쪽을 나눠 읽을 때 겹쳐서 채워진다.
+    raw_lines = (text or "").splitlines()
+    if raw_lines and raw_lines[-1].startswith("|") and not raw_lines[-1].rstrip().endswith("|"):
+        raw_lines = raw_lines[:-1]
+    lines = [ln.strip() for ln in raw_lines if ln.strip().startswith("|")]
     rows_raw = []
     for ln in lines:
         cells = [c.strip() for c in ln.strip("|").split("|")]
@@ -186,6 +201,9 @@ MAX_TABLE_PAGES = settings.get_int("STD_SPEC_MAX_TABLE_PAGES", 40)
 # 캐시에서 이어간다. 사내 게이트웨이는 쪽당 수십 초라 40쪽이면 30분이 넘는데, 끝이
 # 언제인지 모르는 채 기다리다 창을 닫아 버리는 게 실제로 일어났다.
 TIME_BUDGET = settings.get_float("STD_SPEC_TIME_BUDGET", 1800)
+# 한 쪽을 최대 몇 칸까지 나눠 읽을지. 여기까지 나눠도 응답이 잘리면 더 나누는 것은
+# 답이 아니다(한도가 비정상으로 낮은 것) — 사유를 남기고 사람에게 넘긴다.
+MAX_BANDS = settings.get_int("STD_SPEC_MAX_BANDS", 8)
 SPEC_EXTS = (".pdf", ".PDF")
 
 
@@ -396,6 +414,7 @@ class _Scanner:
         self.failed: dict[int, int] = {}   # 0행이 난 쪽 → 그때 쓴 각도
         self.learned_rot = 0               # 이 문서에서 실제로 통한 각도
         self.prefer_plain = plain          # JSON을 건너뛰고 표 전사로 바로 간다
+        self.bands = 1                     # 한 쪽을 몇 칸으로 나눠 읽을지(잘릴 때 늘어남)
 
     def rot_for(self, pno: int) -> int:
         """이 쪽을 몇 도로 돌려 읽을까. **쪽마다 따로 정한다.**
@@ -443,7 +462,21 @@ class _Scanner:
         parsed: dict = {}
         got_json = None
         why = ""
-        if not self.prefer_plain:
+        # 이미 "한 쪽이 한 번에 안 들어간다"가 확인됐으면 처음부터 나눠 읽는다 —
+        # 쪽마다 잘리는 걸 한 번씩 다시 겪는 건 쪽당 수십 초를 그냥 버리는 것이다.
+        if self.bands > 1 and self.prefer_plain:
+            n_band = self.bands
+            while n_band <= MAX_BANDS and not self.stopped:
+                got, cut = self._read_bands(pno, rot, n_band, None)
+                if got:
+                    parsed = got
+                if not cut:
+                    break
+                n_band *= 2                 # 이 쪽은 더 빽빽하다 — 더 잘게
+                print(f"  p{pno}{tag} 아직 잘려 {n_band}칸으로 나눕니다…",
+                      file=sys.stderr)
+            self.bands = max(self.bands, min(n_band, MAX_BANDS))
+        if not parsed.get("rows") and not self.prefer_plain:
             raw, why = vision_ingest.ask_image_detail(
                 png, TABLE_PROMPT + TABLE_PROMPT_EXTRA)
             self.vlm_calls += 1
@@ -476,6 +509,29 @@ class _Scanner:
             self.vlm_calls += 1
             self._dump(pno, rot, "plain", raw2, why2)
             got = _rows_from_markdown(raw2 or "")
+
+            # ③ 응답이 잘렸으면 **쪽을 위아래로 나눠** 다시 읽는다. 한도를 올릴 수
+            #    없는 게이트웨이에서도 통하는 유일한 길이다. 2칸 → 4칸으로 늘린다.
+            if why2 and "잘렸" in why2:
+                cols = (got or {}).get("columns") or []
+                n_band = max(2, self.bands)     # 1칸은 나누는 게 아니다
+                while n_band <= MAX_BANDS and not self.stopped:
+                    print(f"  p{pno}{tag} 응답이 잘려 {n_band}칸으로 나눠 읽습니다…",
+                          file=sys.stderr)
+                    band, cut = self._read_bands(pno, rot, n_band, cols)
+                    if band and len(band["rows"]) > len((got or {}).get("rows") or []):
+                        got = band
+                    if band and not cut:
+                        # 잘림 없이 다 읽었다 — 남은 쪽도 이 칸수로 시작한다.
+                        self.bands = n_band
+                        break
+                    n_band *= 2             # 아직 잘린다 — 더 잘게
+                else:
+                    if not self.stopped:
+                        notes_msg = (f"p{pno}는 {MAX_BANDS}칸으로 나눠도 응답이 "
+                                     "잘립니다 — RAG_VLM_MAX_TOKENS를 올려야 합니다")
+                        print(f"  {notes_msg}", file=sys.stderr)
+
             if got:
                 parsed = got
                 if not self.prefer_plain:
@@ -495,6 +551,54 @@ class _Scanner:
         print(f"  p{pno}{tag} 판독: {n}행{via} "
               f"({took:.0f}초, 누적 {_mmss(time.time() - self.t0)})", file=sys.stderr)
         return parsed
+
+    def _read_bands(self, pno: int, rot: int, n: int, cols):
+        """쪽을 위아래 n칸으로 나눠 전사하고 합친다. 못 얻으면 None.
+
+        왜 필요한가: 행이 많은 치수표는 전사 응답이 `max_tokens` 에서 **잘린다**.
+        잘린 JSON은 파싱에 실패해 "0행"으로만 보였다. 한도를 올리면 되지만 사내
+        게이트웨이가 막아 두면 올릴 수가 없다 — 그때는 **보내는 쪽을 줄이는**
+        수밖에 없다. 칸은 넉넉히 겹쳐 자르고 중복은 dash로 거른다.
+        """
+        merged: dict[str, dict] = {}
+        head: dict = {}
+        cut = False                       # 어느 칸이라도 잘렸으면 더 잘게 나눠야 한다
+        for i in range(n):
+            if self.left() <= 0:
+                self.stopped = True
+                break
+            png = vision_ingest.render_page(self.doc, pno, rotate=rot, band=(i, n))
+            prompt = PLAIN_TABLE_PROMPT
+            use_cols = list((head.get("columns") or cols) or [])
+            if i and use_cols:
+                prompt += BAND_PROMPT_TAIL.format(
+                    columns=" | ".join([head.get("id_column") or "DASH NUMBER"] + use_cols))
+            raw, why = vision_ingest.ask_image_detail(png, prompt)
+            self.vlm_calls += 1
+            self._dump(pno, rot, f"band{i + 1}of{n}", raw, why)
+            got = _rows_from_markdown(raw or "")
+            n_rows = len(got.get("rows") or []) if got else 0
+            if why and "잘렸" in why:
+                cut = True
+            print(f"    p{pno} {i + 1}/{n}칸: {n_rows}행"
+                  + (f"  [{why}]" if why else ""), file=sys.stderr)
+            if not got:
+                # 앞의 두 칸이 내리 비면 그 쪽엔 표가 없는 것으로 본다. 표가 끝난
+                # 다음 쪽까지 칸마다 VLM을 부르면 쪽당 수십 초를 통째로 버린다.
+                if i >= 1 and not merged:
+                    break
+                continue
+            if not head:
+                head = got
+            for r in got["rows"]:
+                merged.setdefault(str(r.get("dash", "")), r)
+        merged.pop("", None)
+        if not merged:
+            return None, cut
+        out = dict(head)
+        out["rows"] = list(merged.values())
+        out["source"] = "markdown"
+        return out, cut
 
     def _dump(self, pno: int, rot: int, kind: str, raw, why: str) -> None:
         """VLM 원문을 파일로 남긴다. 사내망은 로그를 반출할 수 없어 **화면 밖에

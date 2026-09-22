@@ -72,7 +72,11 @@ VLM_URL = settings.get("RAG_VLM_URL", "http://127.0.0.1:8003/v1")
 VLM_MODEL = settings.get("RAG_VLM_MODEL", "gemma")
 VLM_API_KEY = settings.get("RAG_VLM_API_KEY", "")  # 사내 게이트웨이가 요구할 때만
 VLM_TIMEOUT = settings.get_float("RAG_VLM_TIMEOUT", 180)  # 한 페이지 전사 타임아웃(초)
-VLM_MAX_TOKENS = settings.get_int("RAG_VLM_MAX_TOKENS", 4096)
+# 전사 응답 한도. 치수표 한 쪽이 50행을 넘으면 4096으로는 **잘린다** — 잘린 JSON은
+# 파싱에 실패해 "0행"으로만 보여 원인이 안 보였다(실제로 그렇게 헤맸다). 사내
+# 게이트웨이가 더 낮게 막아 두면 이 값을 올려도 소용없으므로, 호출부가 잘림을
+# 감지하면 쪽을 위아래로 나눠 읽는 경로가 따로 있다(spec_table).
+VLM_MAX_TOKENS = settings.get_int("RAG_VLM_MAX_TOKENS", 8192)
 
 # 렌더링. 300 DPI 전면 페이지는 사내 게이트웨이 요청 크기 제한에 걸려 413이 났다
 # (spec-reader 실측). 150 DPI + 긴 변 2000px이 판독과 크기의 타협점.
@@ -336,7 +340,7 @@ def detect_rotation(doc, pages) -> int:
 
 
 def render_page(doc, page_no: int, dpi: int = 0, max_side: int = 0,
-                rotate: int = 0) -> bytes:
+                rotate: int = 0, band=None) -> bytes:
     """열린 fitz 문서의 페이지 하나를 PNG 바이트로 렌더링한다 (1-based).
 
     Pillow가 있으면 긴 변을 max_side로 줄인다 — 요청 크기 제한(413) 대응.
@@ -347,6 +351,11 @@ def render_page(doc, page_no: int, dpi: int = 0, max_side: int = 0,
         **`/Rotate` 없이 내용만 옆으로 그려진** PDF가 흔하다. 그러면 렌더 결과가
         누운 채로 나오고 VLM은 "표가 없다"고만 답한다(오류가 아니라 0행이라
         원인이 안 보인다). 회전은 fitz로 한다 — Pillow가 없어도 동작해야 한다.
+
+    band: `(i, n)` 이면 페이지를 위아래 n칸으로 나눠 **i번째 칸만** 렌더링한다.
+        행이 많은 치수표는 전사 응답이 max_tokens에서 잘리는데, 게이트웨이가 한도를
+        막아 두면 올릴 수도 없다. 그때 쪽을 나눠 읽어 합치기 위한 것이다. 자르기도
+        fitz의 clip으로 해서 Pillow 없이 동작한다.
     """
     dpi = dpi or VLM_DPI
     max_side = max_side or VLM_MAX_SIDE
@@ -359,7 +368,19 @@ def render_page(doc, page_no: int, dpi: int = 0, max_side: int = 0,
         prev = page.rotation
         page.set_rotation((prev + rot) % 360)
     try:
-        pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72))
+        clip = None
+        if band:
+            # 위아래로 n칸 중 i번째. 칸 경계에서 행이 반쯤 잘리면 그 행을 통째로
+            # 잃으므로 **넉넉히 겹쳐서** 자르고, 중복은 dash로 합칠 때 걸러낸다.
+            i, n = int(band[0]), max(1, int(band[1]))
+            r = page.rect
+            h = r.height / n
+            pad = h * 0.08
+            clip = fitz.Rect(r.x0,
+                             max(r.y0, r.y0 + i * h - pad),
+                             r.x1,
+                             min(r.y1, r.y0 + (i + 1) * h + pad))
+        pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72), clip=clip)
         png = pix.tobytes("png")
     finally:
         if prev is not None:

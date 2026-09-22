@@ -373,5 +373,68 @@ bad += check(max(tbl) <= min(tp),
              f"표가 처음 나온 p{min(tp)} 뒤로는 JSON을 안 묻는다 (물은 쪽: {tbl})")
 bad += check(d2["pages_used"] == d1["pages_used"], "결과는 --plain 과 같다")
 
+
+print("\n응답이 잘리면 쪽을 나눠 읽어 합친다 (게이트웨이 상한 대응)")
+# ★ 실측: 사내 게이트웨이가 max_tokens 를 막아 두면 한도를 올릴 수가 없다. 그때는
+#   보내는 쪽을 줄이는 수밖에 없다 — 쪽을 위아래로 나눠 읽고 dash 로 합친다.
+_ROWS, _LIMIT, _TBL = 80, 30, set(range(3, 8))
+_bcalls = []
+
+
+class BandPage(FakePage):
+    def __init__(self):
+        super().__init__((1.0, 0.0))
+
+    @property
+    def rect(self):
+        return types.SimpleNamespace(x0=0, y0=0, x1=600, y1=800, height=800)
+
+
+class BandDoc(FakeDoc):
+    def __init__(self):
+        self.pages = [BandPage() for _ in range(9)]
+
+
+def band_render(d, pno, rotate=0, band=None, **kw):
+    return f"{pno}|{band[0] if band else 0}|{band[1] if band else 1}".encode()
+
+
+def band_ask(png, prompt):
+    """VLM이 한 번에 _LIMIT 행까지만 뱉고 나머지는 잘린다."""
+    pno, i, n = (int(x) for x in png.decode().split("|"))
+    _bcalls.append((pno, n))
+    if pno not in _TBL:
+        return "NO TABLE", ""
+    if "Transcribe" not in prompt:
+        return "I can't find that table.", ""
+    want = list(range((_ROWS * i) // n, (_ROWS * (i + 1)) // n))
+    cut = len(want) > _LIMIT
+    md = "| DASH NUMBER | I.D. INCHES |\n|---|---|\n"
+    md += "".join(f"| {pno}{r:02d} | 0.1{r:02d} |\n" for r in want[:_LIMIT])
+    if cut:
+        md += f"| {pno}{want[_LIMIT]:02d} | 0.1"        # 잘린 마지막 줄
+    return md, ("응답이 max_tokens(8192)에서 잘렸습니다" if cut else "")
+
+
+install(BandDoc(), _TBL, 0, [])
+st.vision_ingest.fitz = types.SimpleNamespace(open=lambda p: BandDoc())
+st.vision_ingest.render_page = band_render
+st.vision_ingest.ask_image_detail = band_ask
+st.vision_ingest.ask_image = lambda p, q: band_ask(p, q)[0]
+f = st._page_cache_path(PDF)
+if f.exists():
+    f.unlink()
+bd = st.read_table(PDF, plain=True)
+_d = [r["dash"] for r in bd["rows"]]
+bad += check(len(bd["rows"]) == _ROWS * 5, f"쪽당 80행 × 5 = {len(bd['rows'])}행 (안 잘림)")
+bad += check(len(_d) == len(set(_d)), "겹쳐 자른 칸의 중복이 제거된다")
+bad += check(all(f"3{i:02d}" in _d for i in range(_ROWS)), "p3의 80행이 하나도 안 빠진다")
+bad += check("I.D. INCHES" in bd["columns"], f"아래 칸에도 컬럼이 이어진다 → {bd['columns']}")
+_later = [n for pno, n in _bcalls if pno in (5, 6, 7)]
+bad += check(_later and min(_later) > 1,
+             f"한 번 배우면 뒤쪽은 처음부터 나눠 읽는다 (칸수 {sorted(set(_later))})")
+bad += check(len([n for pno, n in _bcalls if pno == 8]) <= 3,
+             "표가 끝난 쪽에서 칸마다 부르며 시간을 버리지 않는다")
+
 print(f"\n{'실패 ' + str(bad) + '건' if bad else '전부 통과'}")
 sys.exit(1 if bad else 0)
