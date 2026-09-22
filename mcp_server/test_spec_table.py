@@ -77,6 +77,8 @@ def install(doc, table_pages, good_rot, calls):
 
     fake.render_page = render_page
     fake.ask_image = ask_image
+    # 스캐너는 (응답, 사유) 쌍을 쓴다 — 가짜는 사유 없이 성공으로만 흉내 낸다.
+    fake.ask_image_detail = lambda png, prompt: (fake.ask_image(png, prompt), "")
     st.vision_ingest = fake
     return fake
 
@@ -297,6 +299,44 @@ for label, blind in (("텍스트 레이어 있음", False), ("스캔본(레이�
 bad += check(vi.detect_rotation(Mixed(), [3]) == 90, "쪽 하나로 물으면 90도")
 bad += check(vi.detect_rotation(Mixed(), [1, 2, 3, 4]) == 0,
              "여러 쪽으로 물으면 표지가 이겨 0도 — 그래서 쪽마다 물어야 한다")
+
+
+print("\nJSON 경로가 거절해도 표 전사로 살려낸다")
+# ★ 실측: 같은 쪽을 마크다운 전사로 읽으면 30행이 나오는데 TABLE_PROMPT(JSON)로
+#   읽으면 0행이었다. 이미지도 VLM도 멀쩡한데 JSON을 요구하는 순간 빈 결과가 온다.
+def md_page(pno):
+    return ("| DASH NUMBER | I.D. INCHES | W INCHES |\n|---|---|---|\n"
+            + "".join(f"| {pno}{i:02d} | 0.1{i:02d} | 0.070 |\n" for i in range(30)))
+
+calls2 = []
+
+
+def picky(png, prompt):
+    """JSON을 달라고 하면 '이건 체결구 도면이 아니다'라고 말로 답한다."""
+    pno, rot = (int(x) for x in png.decode().split(":"))
+    calls2.append((pno, "plain" if "Transcribe" in prompt else "json"))
+    if pno not in tp:
+        return "NO TABLE"
+    if "Transcribe" in prompt:
+        return md_page(pno)
+    return "I don't see an aerospace fastener dimension table on this page."
+
+
+install(FakeDoc(14, (1.0, 0.0)), tp, 0, [])
+st.vision_ingest.ask_image = picky
+st.vision_ingest.ask_image_detail = lambda png, pr: (picky(png, pr), "")
+f = st._page_cache_path(PDF)
+if f.exists():
+    f.unlink()
+data = st.read_table(PDF)
+bad += check(bool(data["rows"]), "거절당해도 표를 얻는다")
+bad += check(len(data["rows"]) == 30 * len(data["pages_used"]),
+             f"쪽당 30행 × {len(data['pages_used'])}쪽 = {len(data['rows'])}행")
+bad += check("I.D. INCHES" in data["columns"],
+             f"컬럼 이름이 단위까지 살아 있다 → {data['columns']}")
+bad += check(data["rows"][0]["dash"] == "400", f"dash → {data['rows'][0]['dash']}")
+# 표가 없는 쪽에서 전사를 두 번 부르지는 않는지(비용)
+bad += check(calls2.count((1, "plain")) <= 1, "표 없는 쪽도 전사는 한 번만")
 
 print(f"\n{'실패 ' + str(bad) + '건' if bad else '전부 통과'}")
 sys.exit(1 if bad else 0)

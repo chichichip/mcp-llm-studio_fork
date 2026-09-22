@@ -76,6 +76,69 @@ ALSO IMPORTANT - this document may NOT be a fastener drawing:
 """
 
 
+# 되돌아가는 길: JSON이 안 나올 때 **그냥 표로 옮겨 적게** 한다.
+#
+# ★ 왜 이게 필요한가 — 실측으로 확인된 것: 같은 쪽을 `PAGE_PROMPT`(마크다운 전사)로
+#   읽으면 30행이 멀쩡히 나오는데 `TABLE_PROMPT`(JSON)로 읽으면 0행이었다. 이미지도
+#   VLM도 멀쩡한데 **JSON을 요구하는 순간** 빈 결과가 돌아온 것이다. TABLE_PROMPT는
+#   체결구 도면(MS/AS/NAS)에 맞춰 쓰인 프롬프트라, AS568 같은 '목록 문서'를 보면
+#   모델이 "이건 그 표가 아니다"라고 판단해 버린다.
+#
+#   그래서 JSON을 고집하지 않고, **이미 되는 것으로 물러선다**: 표만 그대로 옮겨
+#   적게 하고 그 마크다운을 우리가 행으로 바꾼다. 판단은 우리가 하고 VLM은 판독만
+#   한다는 원칙(spec-reader CLAUDE.md)에도 이쪽이 더 맞다.
+PLAIN_TABLE_PROMPT = """Transcribe the table on this page. Do not interpret it.
+
+Rules:
+- Output a markdown table: a header row, a separator row, then one row per data row.
+- Copy every cell EXACTLY as printed. Do not round, convert units, or reorder.
+- Use the full column header text as printed, including any unit words.
+- If the table is split into several column groups side by side, read every group and
+  output them as ONE table with one header. Missing a group is the most common mistake.
+- If a cell is unreadable, write ? . Do not guess. Do not invent rows.
+- Output ONLY the table. No title, no explanation, no code fences.
+
+If this page has no table at all, output exactly: NO TABLE
+"""
+
+
+def _rows_from_markdown(text: str) -> dict | None:
+    """마크다운 표(`| a | b |`)를 판독 결과 모양으로 바꾼다. 표가 없으면 None.
+
+    첫 컬럼이 dash 번호라고 본다(치수표의 관례이고 TABLE_PROMPT도 같은 전제다).
+    구분선(`|---|---|`)과 헤더가 되풀이되는 줄은 버린다 — 좌우 그룹을 이어 붙이면
+    가운데에 헤더가 한 번 더 끼는 경우가 있다.
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip().startswith("|")]
+    rows_raw = []
+    for ln in lines:
+        cells = [c.strip() for c in ln.strip("|").split("|")]
+        if not cells or all(re.fullmatch(r"[-: ]*", c) for c in cells):
+            continue                       # 구분선
+        rows_raw.append(cells)
+    if len(rows_raw) < 2:
+        return None
+
+    header = rows_raw[0]
+    width = len(header)
+    cols = [c for c in header[1:] if c]
+    out = []
+    for cells in rows_raw[1:]:
+        if cells == header:                # 되풀이된 헤더
+            continue
+        cells = (cells + [""] * width)[:width]
+        rec = {"dash": cells[0].lstrip("-").strip()}
+        for name, val in zip(header[1:], cells[1:]):
+            if name:
+                rec[name] = val
+        if rec["dash"]:
+            out.append(rec)
+    if not out:
+        return None
+    return {"id_column": header[0], "columns": cols, "rows": out,
+            "table_title": "", "source": "markdown"}
+
+
 # 도면 그림의 치수 기호 범례를 읽는 프롬프트.
 #
 # ★ 이게 왜 필요한가: 표 헤더에는 알파벳(H, K, L, T…)만 있고 **그게 무슨 치수인지는
@@ -369,18 +432,65 @@ class _Scanner:
 
         t = time.time()
         png = vision_ingest.render_page(self.doc, pno, rotate=rot)
-        raw = vision_ingest.ask_image(png, TABLE_PROMPT + TABLE_PROMPT_EXTRA)
-        took = time.time() - t
-        self.vlm_calls += 1
-        self.vlm_time += took
+        tag = f"({rot}도)" if rot else ""
 
-        parsed = _parse_json(raw or "") or {}
+        # ① 검증된 JSON 경로부터. 체결구 도면은 이쪽이 가장 정확하다.
+        raw, why = vision_ingest.ask_image_detail(
+            png, TABLE_PROMPT + TABLE_PROMPT_EXTRA)
+        self.vlm_calls += 1
+        got_json = _parse_json(raw or "")
+        parsed = got_json or {}
+        self._dump(pno, rot, "json", raw, why)
+
+        # ② 안 나오면 **표만 그대로 옮겨 적게** 하고 우리가 행으로 바꾼다.
+        #    같은 쪽이 마크다운 전사로는 멀쩡히 읽히는 것을 실측으로 확인했다 —
+        #    JSON을 고집하다 표를 통째로 놓치는 것보다 이쪽이 낫다.
+        #
+        # ⚠ 단, **JSON이 제대로 와서 "행 없음"이라고 한 쪽은 다시 묻지 않는다.**
+        #   그건 모델이 약속한 형식으로 답하고 "표가 없다"고 말한 것이다(표지·목차).
+        #   다시 묻는 건 쪽당 수십 초를 그냥 버리는 것이다. 되묻는 경우는 **모델이
+        #   형식을 안 지켰을 때**뿐 — 산문으로 거절했거나, 잘렸거나, 호출이 실패한
+        #   때다. 그게 우리가 실제로 겪은 실패의 모양이다.
+        if not parsed.get("rows") and (got_json is None or why):
+            if why:
+                print(f"  p{pno}{tag} JSON 경로 실패: {why}", file=sys.stderr)
+            elif raw is not None:
+                head = " ".join((raw or "").split())[:80]
+                print(f"  p{pno}{tag} JSON 경로가 표를 안 줬습니다"
+                      f'{f" — 응답 앞부분: {head}" if head else " (빈 응답)"}',
+                      file=sys.stderr)
+            print(f"  p{pno}{tag} 표 전사로 다시 시도합니다…", file=sys.stderr)
+            raw2, why2 = vision_ingest.ask_image_detail(png, PLAIN_TABLE_PROMPT)
+            self.vlm_calls += 1
+            self._dump(pno, rot, "plain", raw2, why2)
+            got = _rows_from_markdown(raw2 or "")
+            if got:
+                parsed = got
+            elif why2:
+                print(f"  p{pno}{tag} 표 전사도 실패: {why2}", file=sys.stderr)
+
+        took = time.time() - t
+        self.vlm_time += took
         n = len(parsed.get("rows") or [])
         store[pno] = parsed
         _save_pages(self.pdf, self.cache)      # ★ 쪽마다 저장 — 끊겨도 안 잃는다
-        print(f"  p{pno}{f'({rot}도)' if rot else ''} 판독: {n}행 "
+        via = "" if not n else ("" if parsed.get("source") != "markdown" else " [전사]")
+        print(f"  p{pno}{tag} 판독: {n}행{via} "
               f"({took:.0f}초, 누적 {_mmss(time.time() - self.t0)})", file=sys.stderr)
         return parsed
+
+    def _dump(self, pno: int, rot: int, kind: str, raw, why: str) -> None:
+        """VLM 원문을 파일로 남긴다. 사내망은 로그를 반출할 수 없어 **화면 밖에
+        남는 것이 이것뿐**이고, 0행의 원인은 대개 이 원문 안에 있다. 실패해도
+        판독은 계속한다(우아한 저하)."""
+        try:
+            d = _cache_path(self.pdf).with_name(_cache_path(self.pdf).stem + "_raw")
+            d.mkdir(parents=True, exist_ok=True)
+            (d / f"p{pno:03d}_{rot}_{kind}.txt").write_text(
+                (f"[사유] {why}\n\n" if why else "") + (raw if raw is not None else "<None>"),
+                encoding="utf-8")
+        except OSError:
+            pass
 
     def scan(self, pnos, notes: list[str], force: bool = False, rot: int = -1):
         """여러 쪽을 판독한다. 반환: [(쪽번호, 판독결과)] — 0행인 쪽은 뺀다.

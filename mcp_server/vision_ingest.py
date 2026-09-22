@@ -189,8 +189,14 @@ def vlm_available() -> bool:
     return vlm_check()[0]
 
 
-def ask_image(png_bytes: bytes, prompt: str) -> str | None:
-    """이미지 한 장을 VLM에 보내 텍스트 응답을 받는다. 실패하면 None (저하 신호).
+def ask_image_detail(png_bytes: bytes, prompt: str) -> tuple[str | None, str]:
+    """이미지 한 장을 VLM에 보내 (응답, 사유)를 돌려준다.
+
+    사유는 **빈 결과가 왜 빈지**를 사람이 읽을 한 줄로 적은 것이다. 빈 문자열이면
+    정상. `ask_image`는 이걸 감싼 것이고, 진단이 필요한 호출부만 이쪽을 쓴다.
+
+    왜 필요한가: 지금까지 VLM이 "표가 없다"고 말한 것과, 응답이 잘린 것과, HTTP
+    오류가 난 것이 **전부 똑같이 "0행"으로만** 보였다. 셋은 고칠 곳이 다르다.
 
     temperature=0 — 전사는 창작이 아니다. 같은 페이지를 두 번 읽으면 같아야 한다.
     """
@@ -220,17 +226,39 @@ def ask_image(png_bytes: bytes, prompt: str) -> str | None:
         with urllib.request.urlopen(req, timeout=VLM_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        # 413(요청 과대)은 DPI를 낮추라는 신호 — 사유를 남겨 두면 진단이 빠르다.
-        print(f"[주의] VLM 응답 오류 {e.code} — DPI({VLM_DPI})를 낮춰 보세요.", file=sys.stderr)
-        return None
+        # HTTP 코드마다 뜻이 다르다. 예전에는 무엇이 와도 "DPI를 낮추라"고 적어
+        # 401·404가 났을 때 엉뚱한 곳을 뒤지게 했다 — 사내망은 로그를 반출할 수
+        # 없어 화면 한 줄이 유일한 단서다.
+        hint = {401: "인증 필요 — RAG_VLM_API_KEY 확인",
+                403: "권한 거부",
+                404: f"이 경로 없음 — RAG_VLM_URL({VLM_URL}) 확인",
+                413: f"요청이 너무 큼 — DPI({VLM_DPI})를 낮출 것",
+                429: "요청이 몰림 — 잠시 뒤 다시",
+                }.get(e.code, "서버 오류")
+        print(f"[주의] VLM 응답 오류 {e.code} — {hint}", file=sys.stderr)
+        return None, f"HTTP {e.code} ({hint})"
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
         print(f"[주의] VLM 호출 실패({type(e).__name__}) — 텍스트 레이어로 저하합니다.",
               file=sys.stderr)
-        return None
+        return None, f"호출 실패: {type(e).__name__}: {e}"
     try:
-        return data["choices"][0]["message"]["content"] or ""
+        choice = data["choices"][0]
+        text = choice["message"]["content"] or ""
     except (KeyError, IndexError, TypeError):
-        return None
+        return None, f"응답 모양이 낯섭니다: {str(data)[:200]}"
+    # finish_reason 은 **응답이 잘렸는지**를 알려주는 유일한 신호다. 잘린 JSON은
+    # 파싱에 실패해 "0행"으로만 보이는데, 그건 '표가 없다'와 구별이 안 된다.
+    why = ""
+    fin = choice.get("finish_reason") or choice.get("stop_reason") or ""
+    if fin == "length":
+        why = (f"응답이 max_tokens({VLM_MAX_TOKENS})에서 잘렸습니다 — "
+               "RAG_VLM_MAX_TOKENS를 올리거나 쪽을 나눠 읽어야 합니다")
+    return text, why
+
+
+def ask_image(png_bytes: bytes, prompt: str) -> str | None:
+    """이미지 한 장을 VLM에 보내 텍스트 응답을 받는다. 실패하면 None (저하 신호)."""
+    return ask_image_detail(png_bytes, prompt)[0]
 
 
 # ─────────────────────────────── 페이지 렌더링 ───────────────────────────────
