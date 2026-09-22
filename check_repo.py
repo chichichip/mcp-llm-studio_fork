@@ -234,6 +234,50 @@ def rel(p: Path) -> str:
         return str(p)
 
 
+def check_tool_scope(paths: list[Path]) -> None:
+    """번들 MCP 서버가 전부 스코프 낱말 표에 있는지.
+
+    왜 기계가 봐야 하나: `pick_tool_servers`는 낱말이 **하나라도** 걸리면 걸린 서버만
+    노출한다. 낱말이 없는 서버는 키워드로 영영 안 걸리므로, 다른 서버가 걸리는 순간
+    **그 서버의 도구가 통째로 사라진다**. 화면에는 모델이 "그런 도구가 없다"고 하는
+    것으로만 보여 원인을 찾기 어렵다 — `std`(select_dash)가 실제로 그렇게 사라졌다.
+    """
+    f = ROOT / "llm_studio" / "server" / "config.py"
+    if not f.is_file():
+        return
+    try:
+        src = f.read_text(encoding="utf-8")
+        tree = ast.parse(src)
+    except (OSError, SyntaxError) as e:  # noqa: BLE001
+        warns.append(f"{rel(f)}: 읽지 못해 스코프 검사를 건너뜁니다 ({e})")
+        return
+
+    found: dict[str, object] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for t in node.targets:
+            if isinstance(t, ast.Name) and t.id in (
+                    "DEFAULT_TOOL_SCOPE_KEYWORDS", "MCP_BUNDLED_SERVERS"):
+                try:
+                    found[t.id] = ast.literal_eval(node.value)
+                except ValueError:
+                    pass
+    keywords = found.get("DEFAULT_TOOL_SCOPE_KEYWORDS")
+    bundled = found.get("MCP_BUNDLED_SERVERS")
+    if not isinstance(keywords, dict) or not isinstance(bundled, (list, tuple)):
+        return
+    for entry in bundled:
+        name = entry[0] if isinstance(entry, (list, tuple)) and entry else None
+        if not isinstance(name, str):
+            continue
+        if not keywords.get(name):
+            errors.append(
+                f"{rel(f)}: 번들 서버 '{name}'에 스코프 낱말이 없다 — 다른 서버가 "
+                "걸리면 이 서버의 도구가 조용히 사라진다 "
+                "(DEFAULT_TOOL_SCOPE_KEYWORDS에 추가할 것)")
+
+
 def main() -> int:
     fix = "--fix" in sys.argv
     paths = [p for p in tracked_files() if p.exists()]
@@ -247,6 +291,7 @@ def main() -> int:
     check_tool_stdout(paths)
     check_tool_markdown(paths)
     check_private_tools(paths)
+    check_tool_scope(paths)
 
     for w in warns:
         print(f"  ! {w}")
