@@ -53,3 +53,6 @@ playbooks/*
 
 # 표준품 선정 진행 상태와 결과서 (standard_server.py가 생성하는 런타임 산출물).
 standard_sessions/
+
+# vlm_read.py 출력 (사내 규격서 추출본·이미지 — 공개 repo에 넣지 않는다)
+vlm_out/

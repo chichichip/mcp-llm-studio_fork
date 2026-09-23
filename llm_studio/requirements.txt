@@ -11,5 +11,10 @@ mcp>=1.0
 pypdf>=4.0
 python-docx>=1.1
 
+# 선택: vlm_read.py(스캔 규격서를 사내 VLM으로 읽는 CLI) 전용 — 앱은 쓰지 않는다.
+# 사내 미러 등록 확인됨. 없으면 vlm_read.py만 안내 후 종료(앱에는 영향 없음).
+# 1.24.3 미만이면 `import fitz`로 자동 대체한다.
+pymupdf
+
 # 빌드 전용 (exe로 묶을 때만 필요)
 # pyinstaller>=6.6
